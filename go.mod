@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/klauspost/compress v1.18.0
+	github.com/lmittmann/tint v1.1.2
 	github.com/ncruces/go-sqlite3 v0.29.1
 	github.com/pgaskin/ottrec v0.0.0-20251003040851-e120404591ff
 	github.com/spf13/pflag v1.0.10
