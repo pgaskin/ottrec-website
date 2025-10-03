@@ -418,6 +418,18 @@ func (ref TimeRef) GetScheduleDay() string {
 	return ref.Schedule().GetDay(ref.deref().ScheduleDay)
 }
 
+func (ref ActivityRef) DayTimes(i int) TimeSeq {
+	return TimeSeq(func(yield func(TimeRef) bool) {
+		for tm := range ref.Times() {
+			if tm.GetScheduleDayIndex() == i {
+				if !yield(tm) {
+					return
+				}
+			}
+		}
+	})
+}
+
 // TODO: more helpers
 
 func mustOK[T any](x T, ok bool) T {
