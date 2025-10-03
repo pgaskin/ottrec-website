@@ -15,6 +15,7 @@ import (
 
 	"github.com/pgaskin/ottrec-website/internal/httpx"
 	"github.com/pgaskin/ottrec-website/pkg/ottrecdata"
+	"github.com/pgaskin/ottrec-website/static"
 )
 
 type DataConfig struct {
@@ -40,6 +41,7 @@ func Data(cfg DataConfig) (http.Handler, error) {
 		Base:  "/v1/",
 		Cache: cfg.Cache,
 	})
+	mux.Handle("/static/", static.Handler(static.Data))
 
 	return commonMiddleware(mux), nil
 }
