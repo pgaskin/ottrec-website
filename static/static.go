@@ -23,7 +23,40 @@ import (
 
 // TODO: refactor, compress assets in the background, support renaming assets per group
 
+//go:generate go run fonts.go
+//go:generate go run fetch.go https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js lib/leaflet.js
+//go:generate go run fetch.go https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css lib/leaflet.css
+
 const Base = "/static/"
+
+var (
+	AsapWOFF2         = newFile("fonts/asap.woff2")
+	SourceSans3WOFF2  = newFile("fonts/source_sans_3.woff2")
+	SourceSerif4WOFF2 = newFile("fonts/source_serif_4.woff2")
+	SymbolsWOFF2      = newFile("fonts/symbols.woff2")
+
+	LeafletCSS = newFile("lib/leaflet.css")
+	LeafletJS  = newFile("lib/leaflet.js")
+
+	DataCSS    = newFile("data.css")
+	WebsiteCSS = newFile("website.css")
+
+	Website = newGroup("website",
+		WebsiteCSS,
+		SourceSans3WOFF2,
+		SourceSerif4WOFF2,
+		SymbolsWOFF2,
+		AsapWOFF2,
+		LeafletCSS,
+		LeafletJS,
+	)
+
+	Data = newGroup("data",
+		DataCSS,
+		SourceSans3WOFF2,
+		SourceSerif4WOFF2,
+	)
+)
 
 // Handler compresses all files not already compressed and returns a handler to
 // be served under [Base].
@@ -80,11 +113,13 @@ func newFile(name string) *file {
 			return nil, err
 		}
 
-		switch ext {
-		case ".css":
-			buf = regexp.MustCompile(`url\([^/#;)]+\)`).ReplaceAllFunc(buf, func(b []byte) []byte {
-				return []byte("url(" + getFile(string(b[bytes.IndexByte(b, '(')+1:len(b)-1])).HashName + ")")
-			})
+		if !strings.Contains(name, "/") {
+			switch ext {
+			case ".css":
+				buf = regexp.MustCompile(`url\([^)]+\)`).ReplaceAllFunc(buf, func(b []byte) []byte {
+					return []byte("url(" + getFile(string(b[bytes.IndexByte(b, '(')+1:len(b)-1])).HashName + ")")
+				})
+			}
 		}
 
 		var mimetype string
