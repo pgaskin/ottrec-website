@@ -1,2 +1,3 @@
 static/fonts/* linguist-vendored
 static/lib/* linguist-vendored
+templates/*_templ.go linguist-generated

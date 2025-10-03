@@ -1,0 +1,42 @@
+package templates
+
+import "github.com/pgaskin/ottrec-website/static"
+
+type WebsitePageParams struct {
+	Title       string
+	Description string
+	Canonical   string
+}
+
+templ WebsitePage(params WebsitePageParams) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			if params.Canonical != "" {
+				<link rel="canonical" href={ params.Canonical }/>
+			}
+			<base href="/"/>
+			// TODO: favicon
+			<link rel="stylesheet" href={ static.Path(static.WebsiteCSS) }/>
+			<title>{ params.Title }</title>
+			if params.Description != "" {
+				<meta name="description" content={ params.Description }/>
+			}
+		</head>
+		<body>
+			{ children... }
+		</body>
+	</html>
+}
+
+templ WebsiteErrorPage(title, message string) {
+	@WebsitePage(WebsitePageParams{
+		Title: title,
+	}) {
+		<section class="error">
+			{ message }
+		</section>
+	}
+}
