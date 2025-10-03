@@ -12,8 +12,8 @@ type MutableDataRef struct {
 }
 
 // Mutate allows you to mutate a copy of ref.
-func (ref DataRef) Mutate() MutableDataRef {
-	return MutableDataRef{DataRef{ref.withFilter()}}
+func (ref DataRef) Mutate() *MutableDataRef {
+	return &MutableDataRef{DataRef{ref.withFilter()}}
 }
 
 // Data returns a copy of the ref with the mutations applied.
