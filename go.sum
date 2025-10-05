@@ -39,6 +39,8 @@ github.com/ncruces/julianday v1.0.0 h1:fH0OKwa7NWvniGQtxdJRxAgkBMolni2BjDHaWTxqt
 github.com/ncruces/julianday v1.0.0/go.mod h1:Dusn2KvZrrovOMJuOt0TNXL6tB7U2E8kvza5fFc9G7g=
 github.com/pgaskin/ottrec v0.0.0-20251003040851-e120404591ff h1:cqiEvTzaF77yRcAAGVIwvDBVDVWnJZsULSAKNvTLYi8=
 github.com/pgaskin/ottrec v0.0.0-20251003040851-e120404591ff/go.mod h1:Ma92J4d33urSLAGs9GU15lXCOph2/wstXrqzlm48ZeA=
+github.com/pgaskin/ottrec v0.0.0-20251005234311-bdcda1257d77 h1:GpD0Y3Viphhs3f2ADEdGQOmyycYMcLia6ajZ8PbRKxg=
+github.com/pgaskin/ottrec v0.0.0-20251005234311-bdcda1257d77/go.mod h1:21g8a/vvkWULXFLPcckhyjyCPQ0SFNAFsVRJr8TuVBU=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=

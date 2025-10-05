@@ -258,6 +258,7 @@ func (ref ScheduleGroupRef) GetReservationLinks() iter.Seq[ReservationLink] {
 	return slices.Values(ref.deref().ReservationLinks)
 }
 func (ref ScheduleGroupRef) GetScheduleChangesHTML() string { return ref.deref().ScheduleChangesHTML }
+func (ref ScheduleGroupRef) GetNoResv() bool                { return ref.deref().NoResv }
 
 func (ref ScheduleRef) GetCaption() string { return ref.deref().Caption }
 func (ref ScheduleRef) GetName() string    { return ref.deref().Name }

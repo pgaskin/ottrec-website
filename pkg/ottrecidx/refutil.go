@@ -21,6 +21,8 @@ func (ref ActivityRef) GuessReservationRequirement() (required bool, definite bo
 
 	grp := ref.ScheduleGroup()
 
+	grpNoResv := grp.GetNoResv()
+
 	var grpHasLink bool
 	for range grp.GetReservationLinks() {
 		grpHasLink = true
@@ -39,6 +41,16 @@ func (ref ActivityRef) GuessReservationRequirement() (required bool, definite bo
 				break
 			}
 		}
+	}
+
+	if grpNoResv {
+		// if the group explicitly states reservations not required at the
+		// top-level, go with that, and count it as definite if nothing else
+		// implies it might be a mistake (like the presence of reservation links
+		// with no explicit reservation requirement text)
+		required = false
+		definite = !(grpHasLink && !grpExplicitYes)
+		return
 	}
 
 	if !grpExplicitYes && !grpExplicitNo {

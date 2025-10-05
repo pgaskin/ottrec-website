@@ -34,6 +34,7 @@ type xScheduleGroup struct {
 	Title               string // derived
 	ReservationLinks    []ReservationLink
 	ScheduleChangesHTML string
+	NoResv              bool
 }
 
 type xSchedule struct {
@@ -102,6 +103,7 @@ func newScheduleGroup(a *arena, sa *stringInterner, grp *schema.ScheduleGroup) *
 		return makeReservationLink(sa, lnk)
 	})
 	x.ScheduleChangesHTML = sa.Intern(grp.GetScheduleChangesHtml())
+	x.NoResv = grp.GetXNoresv()
 	return x
 }
 
