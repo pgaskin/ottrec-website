@@ -81,8 +81,8 @@ func (h *websiteHomeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, r, func(data ottrecidx.DataRef) (templ.Component, int, error) {
-		return templates.WebsitePage(templates.WebsitePageParams{
-			Title: "test",
+		return templates.WebsiteHomePage(templates.WebsiteHomePageParams{
+			Data: data,
 		}), http.StatusOK, nil
 	})
 }

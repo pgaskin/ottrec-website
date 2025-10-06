@@ -1,5 +1,6 @@
 package templates
 
+import "github.com/pgaskin/ottrec-website/pkg/ottrecidx"
 import "github.com/pgaskin/ottrec-website/static"
 
 type WebsitePageParams struct {
@@ -38,5 +39,227 @@ templ WebsiteErrorPage(title, message string) {
 		<section class="error">
 			{ message }
 		</section>
+	}
+}
+
+type WebsiteHomePageParams struct {
+	Data ottrecidx.DataRef
+}
+
+templ WebsiteHomePage(params WebsiteHomePageParams) {
+	@WebsitePage(WebsitePageParams{
+		Title:       "Ottawa Recreation Schedules",
+		Description: "View and filter City of Ottawa drop-in recreation schedules.",
+	}) {
+		<h1>Ottawa Recreation Schedules</h1>
+		<p>Lorem ipsum dolor sit amet consectetur adipisicing elit. Quas corporis deserunt dolorum ea, ab expedita. Fugiat aliquam ullam quos, perspiciatis dolore assumenda error excepturi nulla illo nemo, optio iste officia!</p>
+		<table><tr><td>Test 0123456</td></tr></table>
+		<span class="material-symbols-outlined">{ "\ue8b6" }</span>
+		<style>
+			article.Facility {
+				margin: 1rem;
+				background: #e8ecfc;
+
+				> h1 {
+					margin: 0;
+					background: #ccd3f8;
+					padding: .5rem;
+					font-size: 1.4rem;
+				}
+				> section.schedule-groups > section.ScheduleGroup {
+					margin: 1rem;
+				}
+				> section.info {
+					display: flex;
+					flex-direction: row;
+					align-items: stretch;
+					margin: 1rem;
+					gap: 1rem;
+
+					> section {
+						flex: 1;
+						min-width: 0;
+
+						> h1 {
+							font-size: 1.2rem;
+						}
+					}
+				}
+				> footer {
+
+				}
+			}
+			section.ScheduleGroup {
+				border: 1px solid #1a31b3;
+				background: #fff;
+				color: #000;
+
+				> h1 {
+					background: #1a31b3;
+					color: #fff;
+					padding: .5rem;
+					margin: 0;
+					font-size: 1rem;
+				}
+
+				> div.schedule {
+					overflow-y: auto;
+					> table.ScheduleTable {
+						min-width: 100%;
+						width: auto;
+					}
+				}
+			}
+			table.ScheduleTable {
+				border-collapse: collapse;
+				width: 100%;
+				table-layout: fixed;
+
+				caption {
+					background: #eee;
+					padding: .5rem;
+					text-align: left;
+					font-weight: bold;
+					border: 1px solid #ccc;
+				}
+				td, th {
+					border: 1px solid #ccc;
+					padding: .5rem;
+					text-align: center;
+					font-variation-settings: "wdth" 87.5;
+				}
+				> thead > tr > th:first-child,
+				> tbody > tr > th:first-child {
+					width: 10rem;
+					text-align: left;
+				}
+				> tbody > tr > td {
+					padding: 0;
+					> span {
+						display: block;
+						margin: .5em;
+						line-height: 1;
+						break-inside: avoid;
+						white-space: nowrap;
+						font-size: .875em;
+					}
+				}
+			}
+		</style>
+		<section class="orec">
+			{{
+				mut := params.Data.Mutate()
+				mut.Elide()
+				data := mut.Data()
+			}}
+			for fac := range data.Facilities() {
+				<article class="Facility">
+					<h1><a href={ fac.GetSourceURL() }>{ fac.GetName() }</a></h1>
+					for err := range fac.GetErrors() {
+						<aside class="error">
+							Error: { err }
+						</aside>
+					}
+					<section class="info">
+						// maybe a bright-coloured expandale thingy?
+						if v := fac.GetSpecialHoursHTML(); v != "" {
+							<section>
+								<h1>Special Hours</h1>
+								<div class="ott-html">
+									@templ.Raw(v)
+								</div>
+							</section>
+						}
+						if v := fac.GetNotificationsHTML(); v != "" {
+							<section>
+								<h1>Notifications</h1>
+								<div class="ott-html">
+									@templ.Raw(v)
+								</div>
+							</section>
+						}
+					</section>
+					<section class="schedule-groups">
+						for grp := range fac.ScheduleGroups() {
+							<section class="ScheduleGroup">
+								<h1>{ grp.GetLabel() }</h1>
+								if v := grp.GetScheduleChangesHTML(); v != "" {
+									<div class="ott-html">
+										@templ.Raw(v)
+									</div>
+								}
+								<div class="schedule">
+									for sch := range grp.Schedules() {
+										<table class="ScheduleTable">
+											<caption>
+												{ sch.GetCaption() }
+												// probably do this client side based on the current time
+												if from, to, ok := sch.ComputeEffectiveDateRange(); ok {
+													if upd := data.Index().Updated(); !from.IsZero() && upd.Before(from) {
+														{ " (future)" }
+													} else if !to.IsZero() && upd.After(to) {
+														{ " (past)" }
+													} else {
+														{ " (current)" }
+													}
+												}
+											</caption>
+											<thead>
+												<tr>
+													<th></th>
+													for day := range sch.NumDays() {
+														<th>{ sch.GetDay(day) }</th>
+													}
+												</tr>
+											</thead>
+											<tbody>
+												for act := range sch.Activities() {
+													<tr>
+														<th>
+															{ capitalizeFirst(act.GetName()) }
+															if resv, _ :=  act.GuessReservationRequirement(); resv {
+																{ "***" } // maybe a warning icon with a popup with links?
+															}
+														</th>
+														for day := range sch.NumDays() {
+															<td>
+																for tm := range act.Times() {
+																	if tm.GetScheduleDayIndex() == day {
+																		if r, ok := tm.GetRange(); ok {
+																			<span title={ tm.GetLabel() }>
+																				{ prettyTimeRange(r) }
+																			</span>
+																		} else {
+																			<span class="fallback" title={ tm.GetLabel() }>
+																				{ tm.GetLabel() }
+																			</span>
+																		}
+																	}
+																}
+															</td>
+														}
+													</tr>
+												}
+											</tbody>
+										</table>
+									}
+								</div>
+							</section>
+						}
+					</section>
+					<footer>
+						{ fac.GetSourceDate().String() }
+					</footer>
+				</article>
+			}
+			<footer>
+				<ul class="attribution">
+					for a := range data.GetAttribution() {
+						<li>{ a }</li>
+					}
+				</ul>
+			</footer>
+		</section>
+		{ data.Index().Updated().String() }
 	}
 }
