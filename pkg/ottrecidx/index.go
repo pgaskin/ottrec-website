@@ -206,6 +206,13 @@ func (dxr *Indexer) index(hash string, data *schema.Data) *Index {
 
 	idx.durPrecompute, now = time.Since(now), time.Now()
 
+	if enableIndexerSanityCheck {
+		sanityCheck2(idx)
+
+		idx.durSanityCheck += time.Since(now)
+		now = time.Now()
+	}
+
 	_ = now
 	return idx
 }
@@ -374,6 +381,21 @@ func sanityCheck1(idx *Index, data *schema.Data) {
 	ieq(nsch, dat_sch, iterCount(dat.Schedules().Iter()))
 	ieq(nact, dat_act, iterCount(dat.Activities().Iter()))
 	ieq(ntm, dat_tm, iterCount(dat.Times().Iter()))
+}
+
+func sanityCheck2(idx *Index) {
+	if !idx.cached_ActivityRef_GuessReservationRequirement {
+		panic("wtf")
+	}
+	for ref := range idx.Data().Activities() {
+		a1, b1 := ref.GuessReservationRequirement()
+		idx.cached_ActivityRef_GuessReservationRequirement = false
+		a2, b2 := ref.GuessReservationRequirement()
+		idx.cached_ActivityRef_GuessReservationRequirement = true
+		if a1 != a2 || b1 != b2 {
+			panic("wtf")
+		}
+	}
 }
 
 func iterCount[T any](seq iter.Seq[T]) int {
