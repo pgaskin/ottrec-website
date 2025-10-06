@@ -162,7 +162,11 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (from time.Time, to time.Time
 		if !x.IsValid() {
 			return from, to, false
 		}
-		// if there's no month set, skip it
+		// if there's no month set, and there's no year or the from year is equal, use the from month
+		if !monthOK && !from.IsZero() && (!yearOK || from.Year() == year) {
+			month, monthOK = from.Month(), true
+		}
+		// if there's still no month set, skip it
 		if !monthOK {
 			return from, to, false
 		}
