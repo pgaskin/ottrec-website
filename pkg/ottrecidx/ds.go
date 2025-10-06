@@ -192,6 +192,10 @@ func (dst bitmap[T]) Count() int {
 	return dst.kb.Count()
 }
 
+func (dst bitmap[T]) CountTo(until T) int {
+	return dst.kb.CountTo(uint32(until))
+}
+
 func (dst bitmap[T]) Clone(into *bitmap[T]) bitmap[T] {
 	return bitmap[T]{dst.kb.Clone(into.kbmut())}
 }

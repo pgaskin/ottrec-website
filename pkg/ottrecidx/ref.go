@@ -219,6 +219,16 @@ func (ref typedRef[T]) withFilter() typedRef[T] {
 	return typedRef[T]{ref.baseRef.withFilter()}
 }
 
+// nthOfType returns the index of ref from all objects of the same type,
+// starting from zero. If ref is a special type, -1 is returned.
+func (ref typedRef[T]) nthOfType() int {
+	bm := ref.typeBitmap()
+	if bm.IsNil() {
+		return -1
+	}
+	return bm.CountTo(ref.object())
+}
+
 // Boxed typedRefs with exposed getters, setters, and iterators.
 type (
 	DataRef          struct{ typedRef[xData] }

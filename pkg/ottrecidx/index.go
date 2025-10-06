@@ -312,23 +312,38 @@ func sanityCheck1(idx *Index, data *schema.Data) {
 	var dat_fac, dat_grp, dat_sch, dat_act, dat_tm int
 	dat := idx.Data()
 	for fac := range dat.Facilities() {
+		if fac.nthOfType() != dat_fac {
+			panic("wtf")
+		}
 		dat_fac++
 		var fac_grp, fac_sch, fac_act, fac_tm int
 		for grp := range fac.ScheduleGroups() {
+			if grp.nthOfType() != dat_grp {
+				panic("wtf")
+			}
 			dat_grp++
 			fac_grp++
 			var grp_sch, grp_act, grp_tm int
 			for sch := range grp.Schedules() {
+				if sch.nthOfType() != dat_sch {
+					panic("wtf")
+				}
 				dat_sch++
 				fac_sch++
 				grp_sch++
 				var sch_act, sch_tm int
 				for act := range sch.Activities() {
+					if act.nthOfType() != dat_act {
+						panic("wtf")
+					}
 					dat_act++
 					fac_act++
 					grp_act++
 					sch_act++
 					for tm := range act.Times() {
+						if tm.nthOfType() != dat_tm {
+							panic("wtf")
+						}
 						dat_tm++
 						fac_tm++
 						grp_tm++
