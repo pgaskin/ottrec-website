@@ -91,7 +91,9 @@ func main() {
 	}
 
 	if *MemStats {
-		debug.FreeOSMemory()
+		for range 5 {
+			debug.FreeOSMemory()
+		}
 
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
@@ -102,11 +104,13 @@ func main() {
 	}
 
 	if *MemProfile != "" {
-		debug.FreeOSMemory()
+		for range 5 {
+			debug.FreeOSMemory()
+		}
 
 		if f, err := os.Create(*MemProfile); err != nil {
 			panic(err)
-		} else if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+		} else if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
 			f.Close()
 			panic(err)
 		} else if err := f.Close(); err != nil {
@@ -134,12 +138,14 @@ func pbs(base string) func(*error) iter.Seq2[int, []byte] {
 	return func(err *error) iter.Seq2[int, []byte] {
 		return func(yield func(int, []byte) bool) {
 			*err = func() error {
+				tr := &http.Transport{
+					Proxy:              http.ProxyFromEnvironment,
+					DisableCompression: true,
+					MaxIdleConns:       1,
+				}
+				defer tr.CloseIdleConnections()
 				cl := &http.Client{
-					Transport: &http.Transport{
-						Proxy:              http.ProxyFromEnvironment,
-						DisableCompression: true,
-						MaxIdleConns:       1,
-					},
+					Transport: tr,
 				}
 				var (
 					buf = make([]byte, 0, 4*1024*1024)
