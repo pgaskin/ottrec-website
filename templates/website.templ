@@ -322,6 +322,39 @@ templ WebsiteHomePage(params WebsiteHomePageParams) {
 						}
 					</tbody>
 				</table>
+				<section>
+					<ul id="facilities">
+						for fac := range data.Facilities() {
+							{{ lng, lat, _ := fac.GetLngLat() }}
+							<li data-lng={ lng } data-lat={ lat }>
+								{ fac.GetName() }
+								{ fac.GetAddress() }
+							</li>
+						}
+					</ul>
+					<div style="height:800px;width:800px;max-width:100%;max-height:100%" id="map"></div>
+					<link rel="stylesheet" href={ static.Path(static.LeafletCSS) }/>
+					<script src={ static.Path(static.LeafletJS) }></script>
+					<script>
+						const map = L.map('map').setView([45.4, -75.7], 11)
+
+						const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+							maxZoom: 19,
+							attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+						}).addTo(map)
+
+						for (const it of document.querySelectorAll("#facilities > li")) {
+							const lng = parseFloat(it.dataset.lng)
+							const lat = parseFloat(it.dataset.lat)
+							L.circle([lat, lng], {
+								color: 'red',
+								fillColor: '#f03',
+								fillOpacity: 0.5,
+								radius: 5,
+							}).addTo(map)
+						}
+					</script>
+				</section>
 			</section>
 			<footer>
 				<ul class="attribution">
