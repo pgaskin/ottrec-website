@@ -18,6 +18,16 @@ import (
 
 // this file contains the main index logic
 
+var TZ *time.Location
+
+func init() {
+	if tz, err := time.LoadLocation("America/Toronto"); err != nil {
+		panic(err)
+	} else {
+		TZ = tz
+	}
+}
+
 // Indexer contains shared memory for indexed data. It is not safe for
 // concurrent use (but the indexed schedules are).
 type Indexer struct {
@@ -68,6 +78,12 @@ type Index struct {
 	cached_ActivityRef_GuessReservationRequirement_required bitmap[refObj]
 	cached_ActivityRef_GuessReservationRequirement_definite bitmap[refObj]
 
+	// precomputed: ScheduleRef.ComputeEffectiveDateRange
+	cached_ScheduleRef_ComputeEffectiveDateRange      bool
+	cached_ScheduleRef_ComputeEffectiveDateRange_from []time.Time
+	cached_ScheduleRef_ComputeEffectiveDateRange_to   []time.Time
+	cached_ScheduleRef_ComputeEffectiveDateRange_ok   bitmap[refObj]
+
 	// precomputed: Index.Updated
 	updated time.Time
 
@@ -106,16 +122,20 @@ func (dxr *Indexer) Load(pb []byte) (*Index, error) {
 func (dxr *Indexer) index(hash string, data *schema.Data) *Index {
 	now := time.Now()
 
-	var n int
+	var n, nFac, nGrp, nSch, nAct int
 	n++
 	for _, fac := range data.GetFacilities() {
 		n++
+		nFac++
 		for _, grp := range fac.GetScheduleGroups() {
 			n++
+			nGrp++
 			for _, sch := range grp.GetSchedules() {
 				n++
+				nSch++
 				for _, act := range sch.GetActivities() {
 					n++
+					nAct++
 					for _, day := range act.GetDays() {
 						// no increment
 						for range day.GetTimes() {
@@ -148,6 +168,10 @@ func (dxr *Indexer) index(hash string, data *schema.Data) *Index {
 
 		cached_ActivityRef_GuessReservationRequirement_required: makeBitmap[refObj](n),
 		cached_ActivityRef_GuessReservationRequirement_definite: makeBitmap[refObj](n),
+
+		cached_ScheduleRef_ComputeEffectiveDateRange_from: make([]time.Time, nSch),
+		cached_ScheduleRef_ComputeEffectiveDateRange_to:   make([]time.Time, nSch),
+		cached_ScheduleRef_ComputeEffectiveDateRange_ok:   makeBitmap[refObj](n),
 	}
 
 	idx.durScan, now = time.Since(now), time.Now()
@@ -197,6 +221,17 @@ func (dxr *Indexer) index(hash string, data *schema.Data) *Index {
 		}
 	}
 	idx.cached_ActivityRef_GuessReservationRequirement = true
+
+	for act := range idx.Data().Schedules() {
+		i := act.nthOfType()
+		from, to, ok := act.ComputeEffectiveDateRange()
+		idx.cached_ScheduleRef_ComputeEffectiveDateRange_from[i] = from
+		idx.cached_ScheduleRef_ComputeEffectiveDateRange_to[i] = to
+		if ok {
+			idx.cached_ScheduleRef_ComputeEffectiveDateRange_ok.Set(act.object())
+		}
+	}
+	idx.cached_ScheduleRef_ComputeEffectiveDateRange = true
 
 	for fac := range idx.Data().Facilities() {
 		if d := fac.GetSourceDate(); !d.IsZero() && d.After(idx.updated) {
@@ -393,6 +428,19 @@ func sanityCheck2(idx *Index) {
 		a2, b2 := ref.GuessReservationRequirement()
 		idx.cached_ActivityRef_GuessReservationRequirement = true
 		if a1 != a2 || b1 != b2 {
+			panic("wtf")
+		}
+	}
+
+	if !idx.cached_ScheduleRef_ComputeEffectiveDateRange {
+		panic("wtf")
+	}
+	for ref := range idx.Data().Schedules() {
+		a1, b1, c1 := ref.ComputeEffectiveDateRange()
+		idx.cached_ScheduleRef_ComputeEffectiveDateRange = false
+		a2, b2, c2 := ref.ComputeEffectiveDateRange()
+		idx.cached_ScheduleRef_ComputeEffectiveDateRange = true
+		if a1 != a2 || b1 != b2 || c1 != c2 {
 			panic("wtf")
 		}
 	}
