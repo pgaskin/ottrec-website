@@ -1,7 +1,10 @@
 package templates
 
-import "github.com/pgaskin/ottrec-website/pkg/ottrecidx"
-import "github.com/pgaskin/ottrec-website/static"
+import (
+	"cmp"
+	"github.com/pgaskin/ottrec-website/pkg/ottrecidx"
+	"github.com/pgaskin/ottrec-website/static"
+)
 
 type WebsitePageParams struct {
 	Title       string
@@ -252,6 +255,74 @@ templ WebsiteHomePage(params WebsiteHomePageParams) {
 					</footer>
 				</article>
 			}
+			<section>
+				<table>
+					<thead>
+						<th>Facility</th>
+						<th>Date</th>
+						<th>Day</th>
+						<th>Time</th>
+						<th>Activity</th>
+						<th>Reserve</th>
+						<th>Schedule Changes</th>
+					</thead>
+					<tbody>
+						for tm := range data.Times() {
+							<tr>
+								<td>
+									<a href={ tm.Facility().GetSourceURL() }>{ tm.Facility().GetName() }</a>
+								</td>
+								<td>
+									if from, to, ok := tm.Schedule().ComputeEffectiveDateRange(); ok {
+										if to.IsZero() {
+											starting { from.Format("Jan 2") }
+										} else if from.IsZero() {
+											until { to.Format("Jan 2") }
+										} else {
+											{ from.Format("Jan 2") } - { to.Format("Jan 2") }
+										}
+									} else if d := tm.Schedule().GetDate(); d != "" {
+										{ d }
+									} else {
+										{ "?" }
+									}
+								</td>
+								<td>
+									if wkday, ok := tm.GetWeekday(); ok {
+										{ wkday }
+									} else {
+										{ tm.GetScheduleDay() }
+									}
+								</td>
+								<td>
+									if r, ok := tm.GetRange(); ok {
+										{ r.Start.Format(false) } - { r.End.Format(false) }
+									} else {
+										{ tm.GetLabel() }
+									}
+								</td>
+								<td>
+									{ tm.Activity().GetName() }
+								</td>
+								<td>
+									if resv, definite := tm.Activity().GuessReservationRequirement(); resv {
+										{ "Reserve" } // TODO: direct link to first link, or button to show popup with all links if multiple
+									} else if definite {
+										{ "-" }
+									} else {
+										{ "?" }
+									}
+								</td>
+								<td>
+									if cmp.Or(tm.Facility().GetSpecialHoursHTML(), tm.Facility().GetNotificationsHTML(), tm.ScheduleGroup().GetScheduleChangesHTML() ) != "" {
+										{ "View" } // TODO: popup with special hours
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</section>
 			<footer>
 				<ul class="attribution">
 					for a := range data.GetAttribution() {
