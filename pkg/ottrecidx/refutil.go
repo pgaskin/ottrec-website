@@ -217,6 +217,61 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (from time.Time, to time.Time
 	return from, to, true
 }
 
+// SingleDate returns true and a date if the activity date represents a single
+// date rather than a weekday. This should be given more precedence than
+// [ScheduleRef.ComputeEffectiveDateRange], as they sometimes make mistakes in
+// the date range for the special short-term schedules, but still put the
+// correct date in the day header.
+func (ref TimeRef) SingleDate() (time.Time, bool) {
+	sch := ref.Schedule()
+
+	d, ok := sch.GetDayDate(ref.GetScheduleDayIndex())
+	if !ok {
+		return time.Time{}, false
+	}
+
+	month, hasMonth := d.Month()
+	if !hasMonth {
+		return time.Time{}, false
+	}
+
+	day, hasDay := d.Day()
+	if !hasDay {
+		return time.Time{}, false
+	}
+
+	year, hasYear := d.Year()
+	if !hasYear {
+		if from, to, ok := sch.ComputeEffectiveDateRange(); ok {
+			if from.IsZero() || to.IsZero() || from.Year() == to.Year() {
+				// assume whichever year we have
+				if from.IsZero() {
+					year, hasYear = to.Year(), true
+				} else {
+					year, hasYear = from.Year(), true
+				}
+			} else {
+				fromYear, fromMonth, fromDay := from.Date()
+				toYear, toMonth, toDay := from.Date()
+				if fromYear+1 == toYear {
+					// assume the from year if we're not before that date, otherwise the to year, as long as it's one more than the from year
+					if (month < fromMonth || (month == fromMonth && day < fromDay)) && (month < toMonth || (month == toMonth && day < toDay)) {
+						year, hasYear = fromYear+1, true
+					} else {
+						year, hasYear = fromYear, true
+					}
+				}
+			}
+		}
+	}
+	if !hasYear {
+		return time.Time{}, false
+	}
+
+	return time.Date(year, month, day, 0, 0, 0, 0, TZ), true
+
+}
+
 func daysInMonth(year int, month time.Month) int {
 	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
