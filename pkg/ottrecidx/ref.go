@@ -279,6 +279,14 @@ func (ref ScheduleRef) GetDateRange() (schema.DateRange, bool) {
 }
 func (ref ScheduleRef) NumDays() int        { return len(ref.deref().Days) }
 func (ref ScheduleRef) GetDay(i int) string { return ref.deref().Days[i] }
+func (ref ScheduleRef) GetDayDate(i int) (schema.Date, bool) {
+	v := ref.deref().DayDates
+	if i >= len(v) {
+		return 0, false
+	}
+	d := v[i]
+	return d, d != 0
+}
 
 func (ref ActivityRef) GetLabel() string { return ref.deref().Label }
 func (ref ActivityRef) GetName() string  { return ref.deref().Name }
@@ -427,6 +435,10 @@ func (ref ActivityRef) Times() TimeSeq {
 
 func (ref TimeRef) GetScheduleDay() string {
 	return ref.Schedule().GetDay(ref.deref().ScheduleDay)
+}
+
+func (ref TimeRef) GetScheduleDayDate() (schema.Date, bool) {
+	return ref.Schedule().GetDayDate(ref.deref().ScheduleDay)
 }
 
 func (ref ActivityRef) DayTimes(i int) TimeSeq {

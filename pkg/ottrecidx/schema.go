@@ -43,6 +43,7 @@ type xSchedule struct {
 	Date      string           // derived
 	DateRange schema.DateRange // derived (from+to zero if not parsed)
 	Days      []string
+	DayDates  []schema.Date // derived (zero if not parsed)
 }
 
 type xActivity struct {
@@ -116,6 +117,9 @@ func newSchedule(a *arena, sa *stringInterner, grp *schema.Schedule) *xSchedule 
 		x.DateRange = v
 	}
 	x.Days = mapSlice(a, grp.GetDays(), sa.InternFast)
+	x.DayDates = mapSlice(a, grp.GetXDaydates(), func(t int32) schema.Date {
+		return schema.Date(t)
+	})
 	return x
 }
 
