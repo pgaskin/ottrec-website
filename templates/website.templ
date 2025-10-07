@@ -288,7 +288,9 @@ templ WebsiteHomePage(params WebsiteHomePageParams) {
 									}
 								</td>
 								<td>
-									if wkday, ok := tm.GetWeekday(); ok {
+									if d, ok :=  tm.SingleDate(); ok {
+										{ d.Format("2006-01-02") }
+									} else if wkday, ok := tm.GetWeekday(); ok {
 										{ wkday }
 									} else {
 										{ tm.GetScheduleDay() }
