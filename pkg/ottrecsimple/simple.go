@@ -4,7 +4,7 @@
 package ottrecsimple
 
 import (
-	"archive/zip"
+	"bufio"
 	"bytes"
 	"io"
 	"slices"
@@ -153,60 +153,23 @@ func New(data ottrecidx.DataRef) (*Data, error) {
 	return result, nil
 }
 
-func (d Data) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBuffer(nil)
-	jw := newJSONWriter(buf)
-	if err := writeTopJSON(d, jw); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (d Data) WriteCSV(w io.Writer) error {
-	zw := zip.NewWriter(w)
-	if err := writeTopCSV(d, zw); err != nil {
-		return err
-	}
-	return zw.Close()
-}
-
-func writeTopJSON(x any, w *jsonWriter) error {
-	panic("todo")
-}
-
-func writeJSON(x any, w *jsonWriter) error {
-	panic("todo")
-}
-
-func writeTopCSV(x any, w *zip.Writer) error {
-	panic("todo")
-}
-
-// writeCSV writes CSV for a slice of structs.
-func writeCSV(x any, w *csvWriter) error {
-	panic("todo")
-}
-
-type bufferedWriter interface {
+type BufferedWriter interface {
 	Write([]byte) (int, error)
 	WriteByte(byte) error
 	WriteString(string) (int, error)
 	AvailableBuffer() []byte
 }
 
-type jsonWriter struct {
-	w bufferedWriter
-	s byte
+var (
+	_ BufferedWriter = (*bufio.Writer)(nil)
+	_ BufferedWriter = (*bytes.Buffer)(nil)
+)
+
+func newBufferedWriter(w io.Writer) BufferedWriter {
+	if bw, ok := w.(BufferedWriter); ok {
+		return bw
+	}
+	return bufio.NewWriter(w)
 }
 
-func newJSONWriter(w bufferedWriter) *jsonWriter {
-	return &jsonWriter{w: w}
-}
-
-type csvWriter struct {
-	w bufferedWriter
-}
-
-func newCSVWriter(w bufferedWriter) *csvWriter {
-	return &csvWriter{w: w}
-}
+// TODO: csv
