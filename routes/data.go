@@ -2,19 +2,30 @@ package routes
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
+	"context"
+	"crypto/sha1"
+	"encoding/base32"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"weak"
 
+	"github.com/a-h/templ"
+	"github.com/klauspost/compress/zip"
 	"github.com/pgaskin/ottrec-website/internal/httpx"
 	"github.com/pgaskin/ottrec-website/pkg/ottrecdata"
+	"github.com/pgaskin/ottrec-website/pkg/ottrecexp"
+	"github.com/pgaskin/ottrec-website/pkg/ottrecidx"
 	"github.com/pgaskin/ottrec-website/static"
 )
 
@@ -35,15 +46,390 @@ func Data(cfg DataConfig) (http.Handler, error) {
 
 	// TODO: homepage, api doc
 	// TODO: visual low-level historical diff? maybe this should be a separate service?
-	// TODO: csv download (latest version only, cached)?
 
 	mux.Handle("/v1/", &dataAPIv1{
 		Base:  "/v1/",
 		Cache: cfg.Cache,
 	})
+	mux.Handle("/export/", &dataExportHandler{
+		Base:  "/export/",
+		Cache: cfg.Cache,
+	})
 	mux.Handle("/static/", static.Handler(static.Data))
 
+	// so if they panic, they panic early
+	dataExportSchemaCSV()
+	dataExportSchemaJSON()
+
 	return commonMiddleware(mux), nil
+}
+
+type dataExportHandler struct {
+	Base  string
+	Cache *ottrecdata.Cache
+
+	cacheMu sync.Mutex
+	cache   map[string]weak.Pointer[dataExportData]
+
+	latestMu sync.Mutex
+	latest   *dataExportData
+}
+
+type dataExportData struct {
+	id    string
+	ready <-chan struct{}
+
+	err     error
+	csv     []byte
+	csvErr  error
+	json    []byte
+	jsonErr error
+}
+
+// lazy since not everything needs it, and to give a chance to set stuff like
+// [ottrecsimple.JSONSchemaID]
+var (
+	dataExportSchemaJSON = sync.OnceValue(func() []byte {
+		return append(ottrecexp.JSONSchema(), '\n')
+	})
+	dataExportSchemaCSV = sync.OnceValue(func() []byte {
+		return ottrecexp.CSVSchema()
+	})
+)
+
+func (h *dataExportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		h.serveError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if rest, ok := strings.CutPrefix(r.URL.Path, h.Base); ok {
+		if rest == "schema.json" {
+			h.serveSchemaJSON(w, r)
+			return
+		}
+		if rest == "schema.csv" {
+			h.serveSchemaCSV(w, r)
+			return
+		}
+		if spec, ok := strings.CutSuffix(rest, ".json"); ok {
+			h.serveJSON(w, r, spec)
+			return
+		}
+		if spec, ok := strings.CutSuffix(rest, ".csv.zip"); ok {
+			h.serveCSV(w, r, spec)
+			return
+		}
+	}
+
+	h.serveError(w, "not found", http.StatusNotFound)
+}
+
+func (h *dataExportHandler) serveError(w http.ResponseWriter, message string, code int) {
+	d := w.Header()
+	d.Set("Content-Length", strconv.Itoa(len(message)+1))
+	d.Set("Content-Type", "text/plain; charset=utf-8")
+	d.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	io.WriteString(w, message+"\n")
+}
+
+func (h *dataExportHandler) serveSchemaJSON(w http.ResponseWriter, r *http.Request) {
+	b := dataExportSchemaJSON()
+	d := w.Header()
+	d.Set("Content-Length", strconv.Itoa(len(b)))
+	d.Set("Content-Type", "application/schema+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(b)
+}
+
+func (h *dataExportHandler) serveSchemaCSV(w http.ResponseWriter, r *http.Request) {
+	b := dataExportSchemaCSV()
+	d := w.Header()
+	d.Set("Content-Length", strconv.Itoa(len(b)))
+	d.Set("Content-Type", "text/csv; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(b)
+}
+
+func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spec string) {
+	w.Header().Set("Cache-Control", "no-cache")
+
+	buf, id, err := h.resolveCSV(r.Context(), spec)
+	if err != nil {
+		h.serveError(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if buf == nil {
+		h.serveError(w, "no data found for "+strconv.Quote(spec), http.StatusNotFound)
+		return
+	}
+
+	// compute the etag from the server hash and data hash
+	tag := sha1.Sum([]byte(exehash + id))
+	w.Header().Set("ETag", `W/"`+base32.StdEncoding.EncodeToString(tag[:])+`"`) // weak since zip compression may not be deterministic
+
+	// TODO: etag (binary hash and data id)
+
+	w.Header().Set("Content-Type", "application/zip")
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(buf))
+}
+
+func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, spec string) {
+	w.Header().Set("Cache-Control", "no-cache")
+
+	buf, id, err := h.resolveJSON(r.Context(), spec)
+	if err != nil {
+		h.serveError(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if buf == nil {
+		h.serveError(w, "no data found for "+strconv.Quote(spec), http.StatusNotFound)
+		return
+	}
+
+	// TODO: negotiate and cache compression
+
+	// compute the etag from the server hash and data hash
+	tag := sha1.Sum([]byte(exehash + id))
+	w.Header().Set("ETag", `"`+base32.StdEncoding.EncodeToString(tag[:])+`"`)
+
+	w.Header().Set("Content-Type", "application/json")
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(buf))
+}
+
+func (h *dataExportHandler) resolve(spec string) (*dataExportData, error) {
+	if spec == "" {
+		spec = "latest"
+	}
+
+	if d := h.prepare(spec, true); d != nil {
+		return d, nil
+	}
+
+	if spec == "latest" {
+		// TODO: singleflight latest requests or cache for a short time?
+		h.latestMu.Lock()
+		defer h.latestMu.Unlock()
+	}
+
+	slog.Debug("export: resolving version", "spec", spec)
+	id, _, ok, err := h.Cache.ResolveVersion(context.Background(), cmp.Or(spec, "latest"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", spec, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("invalid spec format %q", spec)
+	}
+	if id == "" {
+		return nil, nil
+	}
+
+	d := h.prepare(id, false)
+
+	if spec == "latest" {
+		var old string
+		if h.latest != nil {
+			old = h.latest.id
+		}
+		if old != id {
+			slog.Info("export: got new latest version", "old", old, "new", id)
+		}
+		h.latest = d
+	}
+
+	return d, nil
+}
+
+func (h *dataExportHandler) prepare(id string, cachedOnly bool) *dataExportData {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+
+	if h.cache == nil {
+		h.cache = make(map[string]weak.Pointer[dataExportData])
+	}
+
+	if d, ok := h.cache[id]; ok {
+		if d := d.Value(); d != nil {
+			slog.Debug("export: got cached export", "id", id)
+			return d
+		}
+	}
+	if cachedOnly {
+		return nil
+	}
+
+	r := make(chan struct{})
+	d := &dataExportData{
+		id:    id,
+		ready: r,
+	}
+	runtime.AddCleanup(d, func(id string) {
+		slog.Info("export: freed unused cache", "id", id)
+	}, id)
+	h.cache[id] = weak.Make(d)
+
+	var n int
+	for _, p := range h.cache {
+		if p.Value() != nil {
+			n++
+		}
+	}
+	slog.Info("export: preparing new cache entry", "id", id, "total", n)
+
+	go func() {
+		slog.Debug("export: preparing", "id", id)
+
+		defer func() {
+			if d.err != nil {
+				slog.Error("export: failed", "id", id, "error", d.err)
+			} else {
+				if d.csvErr != nil {
+					slog.Error("export: csv failed", "id", id, "error", d.csvErr)
+				}
+				if d.jsonErr != nil {
+					slog.Error("export: json failed", "id", id, "error", d.jsonErr)
+				}
+				slog.Debug("export: done", "id", id, "csv_size", len(d.csv), "json_size", len(d.json))
+			}
+		}()
+
+		d.err = func() error {
+			defer close(r)
+
+			var blob string
+			var err error
+			for hash, format := range h.Cache.DataFormats(context.Background(), id)(&err) {
+				if format == "pb" {
+					blob = hash
+					break
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("load data %q: resolve format: %w", id, err)
+			}
+			if blob == "" {
+				return fmt.Errorf("load data %q: no pb found", id)
+			}
+
+			var pb []byte
+			exists, err := h.Cache.ReadBlob(context.Background(), blob, false, func(r io.Reader, size int64) error {
+				pb = make([]byte, size)
+				_, err := io.ReadFull(r, pb)
+				return err
+			})
+			if err != nil {
+				return fmt.Errorf("load data %q: read pb: %w", id, err)
+			}
+			if !exists {
+				return fmt.Errorf("load data %q: missing blob", id)
+			}
+
+			idx, err := new(ottrecidx.Indexer).Load(pb)
+			if err != nil {
+				return fmt.Errorf("load data %q: %w", id, err)
+			}
+
+			exp, err := ottrecexp.New(idx.Data())
+			if err != nil {
+				return fmt.Errorf("export data %q: %w", id, err)
+			}
+
+			buf := templ.GetBuffer()
+			defer templ.ReleaseBuffer(buf)
+
+			if err := exportCSV(buf, exp); err != nil {
+				d.csvErr = err
+			} else {
+				d.csv = slices.Clone(buf.Bytes())
+			}
+			d.csvErr = exportCSV(buf, exp)
+
+			buf.Reset()
+
+			if err := ottrecexp.WriteJSON(exp, buf); err != nil {
+				d.jsonErr = err
+			} else {
+				d.json = slices.Clone(buf.Bytes())
+			}
+			buf.Reset()
+
+			return nil
+		}()
+	}()
+
+	return d
+}
+
+func (h *dataExportHandler) resolveCSV(ctx context.Context, spec string) ([]byte, string, error) {
+	d, err := h.resolve(spec)
+	if err != nil {
+		return nil, "", err
+	}
+	if d == nil {
+		return nil, "", nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, d.id, ctx.Err()
+	case <-d.ready:
+		if d.err != nil {
+			return nil, d.id, err
+		}
+		return d.csv, d.id, d.csvErr
+	}
+}
+
+func (h *dataExportHandler) resolveJSON(ctx context.Context, spec string) ([]byte, string, error) {
+	d, err := h.resolve(spec)
+	if err != nil {
+		return nil, "", err
+	}
+	if d == nil {
+		return nil, "", nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, d.id, ctx.Err()
+	case <-d.ready:
+		if d.err != nil {
+			return nil, d.id, err
+		}
+		return d.json, d.id, d.jsonErr
+	}
+}
+
+func exportCSV(w io.Writer, exp *ottrecexp.Data) error {
+	zw := zip.NewWriter(w)
+	{
+		w, err := zw.Create("schema.csv")
+		if err != nil {
+			return err
+		}
+		w.Write(dataExportSchemaCSV())
+	}
+	var serr error
+	if err := ottrecexp.WriteCSV(exp, func(table string) io.Writer {
+		if serr != nil {
+			return nil
+		}
+		w, err := zw.Create(table + ".csv")
+		if err != nil {
+			serr = err
+			return nil
+		}
+		return w
+	}); err != nil {
+		return err
+	}
+	if serr != nil {
+		return serr
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	return nil
 }
 
 type dataAPIv1 struct {
