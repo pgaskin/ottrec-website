@@ -150,14 +150,14 @@ func writeColumnJSON(w BufferedWriter, typ reflect.StructField, val reflect.Valu
 	}
 
 	var (
-		colArgNullZero bool
+		nullzero bool
 	)
 	name, args, _ := strings.Cut(tag, ",")
 	if args != "" {
 		for arg := range strings.SplitSeq(args, ",") {
 			switch arg {
 			case "nullzero":
-				colArgNullZero = true
+				nullzero = true
 			default:
 				return fmt.Errorf("invalid tag arg %q", arg)
 			}
@@ -171,7 +171,7 @@ func writeColumnJSON(w BufferedWriter, typ reflect.StructField, val reflect.Valu
 		return err
 	}
 
-	if colArgNullZero {
+	if nullzero {
 		switch typ.Type.Kind() {
 		case reflect.Slice, reflect.Pointer:
 			if val.IsNil() {
@@ -227,9 +227,13 @@ func writeFieldJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error
 		}
 	case reflect.Bool:
 		if val.Bool() {
-			w.WriteString("true")
+			if _, err := w.WriteString("true"); err != nil {
+				return err
+			}
 		} else {
-			w.WriteString("false")
+			if _, err := w.WriteString("false"); err != nil {
+				return err
+			}
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if _, err := w.Write(strconv.AppendInt(w.AvailableBuffer(), val.Int(), 10)); err != nil {
@@ -258,6 +262,8 @@ func writeFieldJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error
 	}
 	return nil
 }
+
+// TODO: support writing json schema
 
 // jsonSafeSet is encoding/json.safeSet.
 var jsonSafeSet = [utf8.RuneSelf]bool{
