@@ -28,7 +28,7 @@ type Data struct {
 
 type Facility struct {
 	URL               string  `sjson:"url" scsv:"facility_url" doc:"city of ottawa facility page url"`
-	ScrapedAt         string  `sjson:"scrapedAt" scsv:"facility_scraped_at" doc:"date (YYYY-MM-DD) the date for the facility was scraped at"`
+	ScrapedAt         string  `sjson:"scrapedAt" scsv:"facility_scraped_at" doc:"date (YYYY-MM-DD) the date for the facility was scraped at" pattern:"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"`
 	Name              string  `sjson:"name" scsv:"facility_name" doc:"name of the facility"`
 	Address           string  `sjson:"address" scsv:"facility_address" doc:"the address of the facility"`
 	Longitude         float32 `sjson:"longitude,nullzero" scsv:"facility_longitude,emptyzero" doc:"facility longitude (may not be set if geocoding failed)"`
@@ -40,11 +40,11 @@ type Facility struct {
 type Activity struct {
 	FacilityURL string `sjson:"facilityUrl" scsv:"facility_url" doc:"facility url for the activity"`
 
-	StartDate           string   `sjson:"startDate,nullzero" scsv:"activity_date_start,emptyzero" doc:"start date (YYYY-MM-DD), inclusive (may not be set if parsing failed or there's no range)"`
-	EndDate             string   `sjson:"endDate,nullzero" scsv:"activity_date_end,emptyzero" doc:"end date (YYYY-MM-DD), inclusive (may not be set if parsing failed or there's no range)"`
-	Weekday             string   `sjson:"weekday,nullzero" scsv:"activity_weekday,emptyzero" doc:"weekday (lowercase, long-form) or single date (YYYY-MM-DD) (may not be set if parsing failed)"`
-	StartTime           string   `sjson:"startTime,nullzero" scsv:"activity_time_start,emptyzero" doc:"start time (HH:MM), inclusive (may not be set if parsing failed)"`
-	EndTime             string   `sjson:"endTime,nullzero" scsv:"activity_time_end,emptyzero" doc:"end time (HH:MM), exclusive (may not be set if parsing failed)"`
+	StartDate           string   `sjson:"startDate,nullzero" scsv:"activity_date_start,emptyzero" doc:"start date (YYYY-MM-DD), inclusive (may not be set if parsing failed or there's no range)" pattern:"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"`
+	EndDate             string   `sjson:"endDate,nullzero" scsv:"activity_date_end,emptyzero" doc:"end date (YYYY-MM-DD), inclusive (may not be set if parsing failed or there's no range)" pattern:"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"`
+	Weekday             string   `sjson:"weekday,nullzero" scsv:"activity_weekday,emptyzero" doc:"weekday (lowercase, long-form) or single date (YYYY-MM-DD) (may not be set if parsing failed)" pattern:"^(sunday|monday|tuesday|wednesday|thursday|friday|saturday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"`
+	StartTime           string   `sjson:"startTime,nullzero" scsv:"activity_time_start,emptyzero" doc:"start time (HH:MM), inclusive (may not be set if parsing failed)" pattern:"^[0-9]{2}:[0-9]{2}$"`
+	EndTime             string   `sjson:"endTime,nullzero" scsv:"activity_time_end,emptyzero" doc:"end time (HH:MM), exclusive (may not be set if parsing failed)" pattern:"^[0-9]{2}:[0-9]{2}$"`
 	Name                string   `sjson:"name" scsv:"activity_name" doc:"activity name, normalized"`
 	ReservationRequired bool     `sjson:"reservationRequired" scsv:"activity_reservation_required" doc:"whether reservation is required, best-effort"`
 	ReservationLinks    []string `sjson:"reservationLinks" scsv:"activity_reservation_links" doc:"reservation urls (comma-separated for csv)"`
@@ -177,10 +177,11 @@ var (
 )
 
 func newBufferedWriter(w io.Writer) BufferedWriter {
+	if w == nil {
+		return nil
+	}
 	if bw, ok := w.(BufferedWriter); ok {
 		return bw
 	}
 	return bufio.NewWriter(w)
 }
-
-// TODO: csv

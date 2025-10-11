@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	useCRLFCSV = true
-	commaCSV   = ','
+	crlfCSV  = true
+	commaCSV = ','
 )
 
 func CSV(x *Data) iter.Seq2[string, []byte] {
@@ -39,6 +39,14 @@ func CSV(x *Data) iter.Seq2[string, []byte] {
 			panic(err)
 		}
 	}
+}
+
+func CSVSchema() []byte {
+	var buf bytes.Buffer
+	if err := WriteCSVSchema(&buf); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
 }
 
 func TableCSV[T Row](x Table[T]) []byte {
@@ -70,6 +78,10 @@ func WriteCSV(x *Data, fn func(string) io.Writer) error {
 	return nil
 }
 
+func WriteCSVSchema(w io.Writer) error {
+	return writeDataCSVSchema(newBufferedWriter(w), new(Data))
+}
+
 func WriteTableCSV[T Row](x Table[T], w io.Writer) error {
 	val := reflect.ValueOf(x)
 	typ := val.Type()
@@ -82,12 +94,12 @@ func WriteRowCSV[T Row](x *T, w io.Writer) error {
 	return writeRowCSV(newBufferedWriter(w), typ, val, false)
 }
 
-func iterTablesCSV(d *Data) func(*error) iter.Seq2[string, reflect.Value] {
+func iterTablesCSV(x any) func(*error) iter.Seq2[string, reflect.Value] {
 	return func(err *error) iter.Seq2[string, reflect.Value] {
 		return func(yield func(string, reflect.Value) bool) {
 			*err = func() error {
 				var (
-					val = reflect.ValueOf(d)
+					val = reflect.ValueOf(x)
 					typ = val.Type()
 				)
 				if typ.Kind() == reflect.Pointer {
@@ -120,6 +132,67 @@ func iterTablesCSV(d *Data) func(*error) iter.Seq2[string, reflect.Value] {
 			}()
 		}
 	}
+}
+
+func writeDataCSVSchema(w BufferedWriter, x any) error {
+	if _, err := w.WriteString(`table,column,description`); err != nil {
+		return nil
+	}
+	if crlfCSV {
+		if err := w.WriteByte('\r'); err != nil {
+			return err
+		}
+	}
+	if err := w.WriteByte('\n'); err != nil {
+		return err
+	}
+	var err error
+	for table, val := range iterTablesCSV(x)(&err) {
+		typ := val.Type()
+		if typ.Kind() != reflect.Slice {
+			return fmt.Errorf("table %q: unsupported type %s", table, typ)
+		}
+		typ = typ.Elem().Elem()
+		for j := range typ.NumField() {
+			row := typ.Field(j)
+
+			name, ok := row.Tag.Lookup("scsv")
+			if !ok || name == "" {
+				return fmt.Errorf("table %q: missing or invalid tag", table)
+			}
+			name, _, _ = strings.Cut(name, ",")
+
+			doc, ok := row.Tag.Lookup("doc")
+			if !ok {
+				return fmt.Errorf("table %q: missing doc tag", table)
+			}
+
+			if err := writeStringCSV(w, table); err != nil {
+				return err
+			}
+			if err := w.WriteByte(','); err != nil {
+				return err
+			}
+			if err := writeStringCSV(w, name); err != nil {
+				return err
+			}
+			if err := w.WriteByte(','); err != nil {
+				return err
+			}
+			if err := writeStringCSV(w, doc); err != nil {
+				return err
+			}
+			if crlfCSV {
+				if err := w.WriteByte('\r'); err != nil {
+					return err
+				}
+			}
+			if err := w.WriteByte('\n'); err != nil {
+				return err
+			}
+		}
+	}
+	return err
 }
 
 func writeTableRowsCSV(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
@@ -160,7 +233,7 @@ func writeRowCSV(w BufferedWriter, typ reflect.Type, val reflect.Value, header b
 			return fmt.Errorf("write column %q: %w", typ.Field(k).Name, err)
 		}
 	}
-	if useCRLFCSV {
+	if crlfCSV {
 		if err := w.WriteByte('\r'); err != nil {
 			return err
 		}
@@ -335,11 +408,11 @@ func writeStringQuotedCSV(w BufferedWriter, field string) error {
 			case '"':
 				_, err = w.WriteString(`""`)
 			case '\r':
-				if useCRLFCSV {
+				if crlfCSV {
 					err = w.WriteByte('\r')
 				}
 			case '\n':
-				if useCRLFCSV {
+				if crlfCSV {
 					_, err = w.WriteString("\r\n")
 				} else {
 					err = w.WriteByte('\n')
