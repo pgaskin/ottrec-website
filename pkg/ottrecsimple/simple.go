@@ -7,18 +7,23 @@ import (
 	"bufio"
 	"bytes"
 	"io"
-	"slices"
 	"strings"
 
 	"github.com/pgaskin/ottrec-website/pkg/ottrecidx"
 )
 
+type Table[T Row] []*T
+
+type Row interface {
+	Data | Facility | Activity | Error | HTML | Attribution
+}
+
 type Data struct {
-	Facility    []*Facility `sjson:"facility" scsv:"facility" doc:"facility information"`
-	Activity    []*Activity `sjson:"activity" scsv:"activity" doc:"activity information"`
-	Error       []*Error    `sjson:"error" scsv:"error" doc:"errors which occured while scraping the facility pages"`
-	HTML        []*HTML     `sjson:"html" scsv:"html" doc:"longer snippets of html referenced from facility/activity"`
-	Attribution []string    `sjson:"attribution" scsv:"attribution" doc:"attribution text"`
+	Facility    Table[Facility]    `sjson:"facility" scsv:"facility" doc:"facility information"`
+	Activity    Table[Activity]    `sjson:"activity" scsv:"activity" doc:"activity information"`
+	Error       Table[Error]       `sjson:"error" scsv:"error" doc:"errors which occured while scraping the facility pages"`
+	HTML        Table[HTML]        `sjson:"html" scsv:"html" doc:"longer snippets of html referenced from facility/activity"`
+	Attribution Table[Attribution] `sjson:"attribution" scsv:"attribution" doc:"attribution"`
 }
 
 type Facility struct {
@@ -62,14 +67,17 @@ type HTML struct {
 	HTML string `sjson:"html" scsv:"html" doc:"raw html"` // note: 0th is always the empty string
 }
 
+type Attribution struct {
+	Text string `sjson:"text" scsv:"text" doc:"text"`
+}
+
 const dateFormat = "2006-01-02"
 
 func New(data ottrecidx.DataRef) (*Data, error) {
 	result := &Data{
-		Facility:    make([]*Facility, 0, data.Facilities().Len()),
-		Activity:    make([]*Activity, 0, data.Times().Len()),
-		HTML:        []*HTML{{0, ""}},
-		Attribution: slices.Collect(data.GetAttribution()),
+		Facility: make([]*Facility, 0, data.Facilities().Len()),
+		Activity: make([]*Activity, 0, data.Times().Len()),
+		HTML:     []*HTML{{0, ""}},
 	}
 	htmlID := map[string]int{}
 	addHTML := func(s string) int {
@@ -149,6 +157,9 @@ func New(data ottrecidx.DataRef) (*Data, error) {
 			result.Activity = append(result.Activity, &ra)
 		}
 		result.Facility = append(result.Facility, &rf)
+	}
+	for attrib := range data.GetAttribution() {
+		result.Attribution = append(result.Attribution, &Attribution{attrib})
 	}
 	return result, nil
 }

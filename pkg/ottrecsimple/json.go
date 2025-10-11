@@ -2,7 +2,6 @@ package ottrecsimple
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -11,25 +10,30 @@ import (
 	"unicode/utf8"
 )
 
-var (
-	_ json.Marshaler = Data{}
-)
-
-func (d Data) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBuffer(nil)
-	if err := d.WriteJSON(buf); err != nil {
-		return nil, fmt.Errorf("marshal data json: %w", err)
+func JSON(x *Data) []byte {
+	var b bytes.Buffer
+	if err := writeDataJSON(&b, x); err != nil {
+		panic(err)
 	}
-	return buf.Bytes(), nil
+	return nil
 }
 
 // WriteJSON writes the data as JSON to w. If w implements [BufferedWriter]
 // (like [bytes.Buffer] or [bufio.Writer]), it will be used directly.
-func (d Data) WriteJSON(w io.Writer) error {
-	if err := writeDataJSON(newBufferedWriter(w), &d); err != nil {
-		return fmt.Errorf("marshal data json: %w", err)
-	}
-	return nil
+func WriteJSON(x *Data, w io.Writer) error {
+	return writeDataJSON(newBufferedWriter(w), x)
+}
+
+func WriteTableJSON[T Row](x Table[T], w io.Writer) error {
+	val := reflect.ValueOf(x)
+	typ := val.Type()
+	return writeTableRowsJSON(newBufferedWriter(w), typ, val)
+}
+
+func WriteRowJSON[T Row](x *T, w io.Writer) error {
+	val := reflect.ValueOf(x)
+	typ := val.Type()
+	return writeRowJSON(newBufferedWriter(w), typ, val)
 }
 
 func writeDataJSON(w BufferedWriter, data any) error {
@@ -83,12 +87,15 @@ func writeTableJSON(w BufferedWriter, typ reflect.StructField, val reflect.Value
 	if err := w.WriteByte(':'); err != nil {
 		return err
 	}
+	return writeTableRowsJSON(w, typ.Type, val)
+}
 
+func writeTableRowsJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
 	if err := w.WriteByte('['); err != nil {
 		return err
 	}
-	if typ.Type.Kind() != reflect.Slice {
-		return fmt.Errorf("unsupported type %s", typ.Type)
+	if typ.Kind() != reflect.Slice {
+		return fmt.Errorf("unsupported type %s", typ)
 	}
 	for j := range val.Len() {
 		if j != 0 {
@@ -96,7 +103,7 @@ func writeTableJSON(w BufferedWriter, typ reflect.StructField, val reflect.Value
 				return err
 			}
 		}
-		if err := writeRowJSON(w, typ.Type.Elem(), val.Index(j)); err != nil {
+		if err := writeRowJSON(w, typ.Elem(), val.Index(j)); err != nil {
 			return fmt.Errorf("write row: %w", err)
 		}
 	}
@@ -114,30 +121,24 @@ func writeRowJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
 		typ = typ.Elem()
 		val = val.Elem()
 	}
-	switch typ.Kind() {
-	case reflect.String:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), val.Interface().(string))); err != nil {
-			return err
-		}
-	case reflect.Struct:
-		if err := w.WriteByte('{'); err != nil {
-			return err
-		}
-		for k := range typ.NumField() {
-			if k != 0 {
-				if err := w.WriteByte(','); err != nil {
-					return err
-				}
-			}
-			if err := writeColumnJSON(w, typ.Field(k), val.Field(k)); err != nil {
-				return fmt.Errorf("write column %q: %w", typ.Field(k).Name, err)
-			}
-		}
-		if err := w.WriteByte('}'); err != nil {
-			return err
-		}
-	default:
+	if typ.Kind() != reflect.Struct {
 		return fmt.Errorf("unsupported type %s", typ)
+	}
+	if err := w.WriteByte('{'); err != nil {
+		return err
+	}
+	for k := range typ.NumField() {
+		if k != 0 {
+			if err := w.WriteByte(','); err != nil {
+				return err
+			}
+		}
+		if err := writeColumnJSON(w, typ.Field(k), val.Field(k)); err != nil {
+			return fmt.Errorf("write column %q: %w", typ.Field(k).Name, err)
+		}
+	}
+	if err := w.WriteByte('}'); err != nil {
+		return err
 	}
 	return nil
 }
