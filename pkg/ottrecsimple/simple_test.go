@@ -87,14 +87,17 @@ func TestNew(t *testing.T) {
 }
 
 func TestBufferedWriter(t *testing.T) {
-	if newBufferedWriter(nil) != nil {
+	if newStickyBufferedWriter(nil) != nil {
 		t.Errorf("newBufferedWriter should preserve nil-ness")
 	}
-	if w := bytes.NewBuffer(nil); newBufferedWriter(w) != w {
-		t.Errorf("newBufferedWriter(%T) should return as-is", w)
+	if w := bytes.NewBuffer(nil); newStickyBufferedWriter(w).w != w {
+		t.Errorf("newBufferedWriter(%T) should use the buffer as-is", w)
 	}
-	if v, ok := newBufferedWriter(new(dummyWriter)).(*bufio.Writer); !ok || v == nil {
-		t.Errorf("newBufferedWriter should return a %T", v)
+	if w := bufio.NewWriter(new(dummyWriter)); newStickyBufferedWriter(w).w != w || newStickyBufferedWriter(w).f == nil {
+		t.Errorf("newBufferedWriter(%T) should use the buffer as-is and not have a nil flush", w)
+	}
+	if w := newStickyBufferedWriter(new(dummyWriter)); w.f == nil {
+		t.Errorf("newBufferedWriter should not have a nil flush")
 	}
 }
 

@@ -59,14 +59,17 @@ func TableCSV[T Row](x Table[T]) []byte {
 }
 
 // WriteCSV writes the data as CSV, calling fn for each table to get w. If w is
-// nil, the table is skipped. If w implements [BufferedWriter] (like
-// [bytes.Buffer] or [bufio.Writer]), it will be used directly.
+// nil, the table is skipped.
 func WriteCSV(x *Data, fn func(string) io.Writer) error {
 	var err error
 	for table, val := range iterTablesCSV(x)(&err) {
 		typ := val.Type()
 		if w := fn(table); w != nil {
-			if err := writeTableRowsCSV(newStickyBufferedWriter(newBufferedWriter(w)), typ, val); err != nil {
+			bw := newStickyBufferedWriter(w)
+			if err := writeTableRowsCSV(bw, typ, val); err != nil {
+				return fmt.Errorf("write table %s: %w", table, err)
+			}
+			if err := bw.Flush(); err != nil {
 				return fmt.Errorf("write table %s: %w", table, err)
 			}
 		}
@@ -78,19 +81,31 @@ func WriteCSV(x *Data, fn func(string) io.Writer) error {
 }
 
 func WriteCSVSchema(w io.Writer) error {
-	return writeDataCSVSchema(newStickyBufferedWriter(newBufferedWriter(w)), new(Data))
+	bw := newStickyBufferedWriter(w)
+	if err := writeDataCSVSchema(bw, new(Data)); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func WriteTableCSV[T Row](x Table[T], w io.Writer) error {
+	bw := newStickyBufferedWriter(w)
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeTableRowsCSV(newStickyBufferedWriter(newBufferedWriter(w)), typ, val)
+	if err := writeTableRowsCSV(bw, typ, val); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func WriteRowCSV[T Row](x *T, w io.Writer) error {
+	bw := newStickyBufferedWriter(w)
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeRowCSV(newStickyBufferedWriter(newBufferedWriter(w)), typ, val, false)
+	if err := writeRowCSV(bw, typ, val, false); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func iterTablesCSV(x any) func(*error) iter.Seq2[string, reflect.Value] {

@@ -32,26 +32,41 @@ func JSONSchema() []byte {
 	return buf.Bytes()
 }
 
-// WriteJSON writes the data as JSON to w. If w implements [BufferedWriter]
-// (like [bytes.Buffer] or [bufio.Writer]), it will be used directly.
+// WriteJSON writes the data as JSON to w.
 func WriteJSON(x *Data, w io.Writer) error {
-	return writeDataJSON(newStickyBufferedWriter(newBufferedWriter(w)), x)
+	bw := newStickyBufferedWriter(w)
+	if err := writeDataJSON(bw, x); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func WriteJSONSchema(w io.Writer) error {
-	return writeDataJSONSchema(newStickyBufferedWriter(newBufferedWriter(w)), new(Data))
+	bw := newStickyBufferedWriter(w)
+	if err := writeDataJSONSchema(bw, new(Data)); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func WriteTableJSON[T Row](x Table[T], w io.Writer) error {
+	bw := newStickyBufferedWriter(w)
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeTableRowsJSON(newStickyBufferedWriter(newBufferedWriter(w)), typ, val)
+	if err := writeTableRowsJSON(bw, typ, val); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func WriteRowJSON[T Row](x *T, w io.Writer) error {
+	bw := newStickyBufferedWriter(w)
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeRowJSON(newStickyBufferedWriter(newBufferedWriter(w)), typ, val)
+	if err := writeRowJSON(bw, typ, val); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func writeDataJSON(w *stickyBufferedWriter, data any) error {
@@ -429,6 +444,7 @@ func (w *stickyBufferedWriter) KeyValueJSON(comma bool, key string, value string
 	w.StringJSON(value)
 }
 
+// StringJSON is based on encoding/json.encodeState.stringBytes.
 func (w *stickyBufferedWriter) StringJSON(s string) {
 	w.Write(appendStringJSON(w.AvailableBuffer(), s))
 }

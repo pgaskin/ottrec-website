@@ -165,65 +165,68 @@ func New(data ottrecidx.DataRef) (*Data, error) {
 	return result, nil
 }
 
-type BufferedWriter interface {
-	Write([]byte) (int, error)
-	WriteByte(byte) error
-	WriteString(string) (int, error)
-	AvailableBuffer() []byte
-}
-
-var (
-	_ BufferedWriter = (*bufio.Writer)(nil)
-	_ BufferedWriter = (*bytes.Buffer)(nil)
-)
-
-func newBufferedWriter(w io.Writer) BufferedWriter {
-	if w == nil {
-		return nil
-	}
-	if bw, ok := w.(BufferedWriter); ok {
-		return bw
-	}
-	return bufio.NewWriter(w)
-}
-
 type stickyBufferedWriter struct {
-	w BufferedWriter
+	w interface {
+		Write([]byte) (int, error)
+		WriteByte(byte) error
+		WriteString(string) (int, error)
+		AvailableBuffer() []byte
+	}
+	f func() error
 	e error
 }
 
-func newStickyBufferedWriter(w BufferedWriter) *stickyBufferedWriter {
+func newStickyBufferedWriter(w io.Writer) *stickyBufferedWriter {
 	if w == nil {
 		return nil
 	}
-	return &stickyBufferedWriter{w: w}
+	if bw, ok := w.(*bytes.Buffer); ok {
+		return &stickyBufferedWriter{w: bw}
+	}
+	bw := bufio.NewWriter(w)
+	return &stickyBufferedWriter{w: bw, f: bw.Flush}
 }
 
 func (w *stickyBufferedWriter) Err() error {
 	return w.e
 }
 
-func (w *stickyBufferedWriter) Write(b []byte) {
-	if w.e == nil {
-		if _, err := w.w.Write(b); err != nil {
-			w.e = err
+func (w *stickyBufferedWriter) Flush() error {
+	if w.e != nil {
+		return w.e
+	}
+	if w.f != nil {
+		if err := w.f(); err != nil {
+			w.e = w.f()
 		}
+	}
+	return w.e
+}
+
+func (w *stickyBufferedWriter) Write(b []byte) {
+	if w.e != nil {
+		return
+	}
+	if _, err := w.w.Write(b); err != nil {
+		w.e = err
 	}
 }
 
 func (w *stickyBufferedWriter) Byte(b byte) {
-	if w.e == nil {
-		if err := w.w.WriteByte(b); err != nil {
-			w.e = err
-		}
+	if w.e != nil {
+		return
+	}
+	if err := w.w.WriteByte(b); err != nil {
+		w.e = err
 	}
 }
 
 func (w *stickyBufferedWriter) String(s string) {
-	if w.e == nil {
-		if _, err := w.w.WriteString(s); err != nil {
-			w.e = err
-		}
+	if w.e != nil {
+		return
+	}
+	if _, err := w.w.WriteString(s); err != nil {
+		w.e = err
 	}
 }
 
