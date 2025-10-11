@@ -11,14 +11,12 @@ import (
 	"net/http"
 	"path"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/klauspost/compress/gzip"
-	"github.com/klauspost/compress/zstd"
-	"github.com/pgaskin/ottrec-website/internal/httpx"
+	"github.com/pgaskin/ottrec-website/internal/httpfile"
 )
 
 // TODO: refactor, compress assets in the background, support renaming assets per group
@@ -78,24 +76,15 @@ type file struct {
 	HashName     string
 	ContentType  string
 	Hash         string
-	Encodings    []string
-	Raw          [][]byte
+	Raw          []byte
+	compressed   http.Handler
 	compressOnce sync.Once
 }
 
 func (f *file) compress() {
 	f.compressOnce.Do(func() {
 		slog.Info("static: compressing asset", "name", f.Name, "hash_name", f.HashName)
-		gzipped, err := gzipBytes(f.Raw[0])
-		if err != nil {
-			panic(fmt.Errorf("gzip %q: %w", f.Name, err))
-		}
-		zstdded, err := zstdBytes(f.Raw[0])
-		if err != nil {
-			panic(fmt.Errorf("zstd %q: %w", f.Name, err))
-		}
-		f.Encodings = append(f.Encodings, "gzip", "zstd")
-		f.Raw = append(f.Raw, gzipped, zstdded)
+		f.compressed = httpfile.Static(f.Raw, f.ContentType, time.Time{}, "")
 	})
 }
 
@@ -143,8 +132,7 @@ func newFile(name string) *file {
 			HashName:    hashName,
 			ContentType: mimetype,
 			Hash:        hash,
-			Encodings:   []string{""},
-			Raw:         [][]byte{buf},
+			Raw:         buf,
 		}, nil
 	}()
 	if err != nil {
@@ -196,9 +184,6 @@ func (g *group) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// we support negotiating the content encoding
-	w.Header().Add("Vary", "Accept-Encoding")
-
 	// match the filename
 	name, ok := strings.CutPrefix(r.URL.Path, Base)
 	if !ok && name == "/favicon.ico" {
@@ -222,74 +207,9 @@ func (g *group) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// negotiate the content encoding
-	encoding := httpx.NegotiateContent(r.Header.Values("Accept-Encoding"), file.Encodings)
-	if encoding != "" {
-		w.Header().Set("Content-Encoding", encoding)
-	}
-	buf := file.Raw[slices.Index(file.Encodings, encoding)]
-
-	// set the mimetype
-	if file.ContentType != "" {
-		w.Header().Set("Content-Type", file.ContentType)
-	}
-
 	// cache hashed files (but don't say immutable just in case we have bugs
 	// somewhere)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 
-	// compute the etag from the file hash and encoding
-	var etag strings.Builder
-	etag.WriteString(`W/"`)
-	etag.WriteString(file.Hash)
-	if encoding != "" {
-		etag.WriteByte('-')
-		etag.WriteString(encoding)
-	}
-	etag.WriteString(`"`)
-	w.Header().Set("ETag", etag.String())
-
-	// check etag match
-	if slices.Contains(r.Header.Values("If-None-Match"), etag.String()) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	// no body for head request
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// serve the content
-	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
-	w.WriteHeader(http.StatusOK)
-	w.Write(buf)
-}
-
-func gzipBytes(b []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w := gzip.NewWriter(&buf)
-	if _, err := w.Write(b); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func zstdBytes(b []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w, err := zstd.NewWriter(&buf)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(b); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	file.compressed.ServeHTTP(w, r)
 }
