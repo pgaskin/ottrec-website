@@ -1,4 +1,4 @@
-package ottrecsimple
+package ottrecexp
 
 import (
 	"bufio"

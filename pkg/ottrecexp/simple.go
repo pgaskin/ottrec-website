@@ -1,7 +1,7 @@
-// Package ottrecsimple produces a simplified denormalized dataset for
-// recreation schedules. Unlike to the scraper schema, this format makes
-// higher-level conclusions and does not try to preserve the original structure.
-package ottrecsimple
+// Package ottrecexp exports a simplified denormalized dataset for recreation
+// schedules. Unlike to the scraper schema, this format makes higher-level
+// conclusions and does not try to preserve the original structure.
+package ottrecexp
 
 import (
 	"bufio"
