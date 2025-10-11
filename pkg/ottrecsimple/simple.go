@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/pgaskin/ottrec-website/pkg/ottrecidx"
@@ -184,4 +185,59 @@ func newBufferedWriter(w io.Writer) BufferedWriter {
 		return bw
 	}
 	return bufio.NewWriter(w)
+}
+
+type stickyBufferedWriter struct {
+	w BufferedWriter
+	e error
+}
+
+func newStickyBufferedWriter(w BufferedWriter) *stickyBufferedWriter {
+	if w == nil {
+		return nil
+	}
+	return &stickyBufferedWriter{w: w}
+}
+
+func (w *stickyBufferedWriter) Err() error {
+	return w.e
+}
+
+func (w *stickyBufferedWriter) Write(b []byte) {
+	if w.e == nil {
+		if _, err := w.w.Write(b); err != nil {
+			w.e = err
+		}
+	}
+}
+
+func (w *stickyBufferedWriter) Byte(b byte) {
+	if w.e == nil {
+		if err := w.w.WriteByte(b); err != nil {
+			w.e = err
+		}
+	}
+}
+
+func (w *stickyBufferedWriter) String(s string) {
+	if w.e == nil {
+		if _, err := w.w.WriteString(s); err != nil {
+			w.e = err
+		}
+	}
+}
+
+func (w *stickyBufferedWriter) AvailableBuffer() []byte {
+	return w.w.AvailableBuffer()
+}
+
+func (w *stickyBufferedWriter) Float(f float64, fmt byte, prec int, bitSize int) {
+	w.Write(strconv.AppendFloat(w.AvailableBuffer(), f, fmt, prec, bitSize))
+}
+
+func (w *stickyBufferedWriter) Int(i int64, base int) {
+	w.Write(strconv.AppendInt(w.AvailableBuffer(), i, base))
+}
+func (w *stickyBufferedWriter) Uint(i uint64, base int) {
+	w.Write(strconv.AppendUint(w.AvailableBuffer(), i, base))
 }

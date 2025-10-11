@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,7 +18,7 @@ func JSON(x *Data) []byte {
 		return nil
 	}
 	var b bytes.Buffer
-	if err := writeDataJSON(&b, x); err != nil {
+	if err := WriteJSON(x, &b); err != nil {
 		panic(err)
 	}
 	return b.Bytes()
@@ -36,29 +35,27 @@ func JSONSchema() []byte {
 // WriteJSON writes the data as JSON to w. If w implements [BufferedWriter]
 // (like [bytes.Buffer] or [bufio.Writer]), it will be used directly.
 func WriteJSON(x *Data, w io.Writer) error {
-	return writeDataJSON(newBufferedWriter(w), x)
+	return writeDataJSON(newStickyBufferedWriter(newBufferedWriter(w)), x)
 }
 
 func WriteJSONSchema(w io.Writer) error {
-	return writeDataJSONSchema(newBufferedWriter(w), new(Data))
+	return writeDataJSONSchema(newStickyBufferedWriter(newBufferedWriter(w)), new(Data))
 }
 
 func WriteTableJSON[T Row](x Table[T], w io.Writer) error {
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeTableRowsJSON(newBufferedWriter(w), typ, val)
+	return writeTableRowsJSON(newStickyBufferedWriter(newBufferedWriter(w)), typ, val)
 }
 
 func WriteRowJSON[T Row](x *T, w io.Writer) error {
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeRowJSON(newBufferedWriter(w), typ, val)
+	return writeRowJSON(newStickyBufferedWriter(newBufferedWriter(w)), typ, val)
 }
 
-func writeDataJSON(w BufferedWriter, data any) error {
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
+func writeDataJSON(w *stickyBufferedWriter, data any) error {
+	w.Byte('{')
 	var (
 		val = reflect.ValueOf(data)
 		typ = val.Type()
@@ -71,83 +68,53 @@ func writeDataJSON(w BufferedWriter, data any) error {
 		val = val.Elem()
 	}
 	if JSONSchemaID != "" {
-		if err := writeKeyValueJSON(w, false, "$schema", JSONSchemaID); err != nil {
-			return err
-		}
-		if err := w.WriteByte(','); err != nil {
-			return err
-		}
+		w.KeyValueJSON(false, "$schema", JSONSchemaID)
+		w.Byte(',')
 	}
 	for i := range typ.NumField() {
 		if i != 0 {
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
+			w.Byte(',')
 		}
 		if err := writeTableJSON(w, typ.Field(i), val.Field(i)); err != nil {
 			return fmt.Errorf("write table %s: %w", typ.Field(i).Name, err)
 		}
 
 	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte('}')
+	return w.Err()
 }
 
-func writeDataJSONSchema(w BufferedWriter, data any) error {
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
+func writeDataJSONSchema(w *stickyBufferedWriter, data any) error {
+	w.Byte('{')
 	var (
 		typ = reflect.TypeOf(data)
 	)
 	if typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
-	if err := writeKeyValueJSON(w, false, "$schema", "https://json-schema.org/draft/2020-12/schema"); err != nil {
-		return err
-	}
+	w.KeyValueJSON(false, "$schema", "https://json-schema.org/draft/2020-12/schema")
 	if JSONSchemaID != "" {
-		if err := writeKeyValueJSON(w, true, "$id", JSONSchemaID); err != nil {
-			return err
-		}
+		w.KeyValueJSON(true, "$id", JSONSchemaID)
 	}
-	if err := writeKeyValueJSON(w, true, "title", "Ottawa Recreation Schedules"); err != nil {
-		return err
-	}
-	if err := writeKeyValueJSON(w, true, "description", "Simplified dataset of City of Ottawa recreation schedules"); err != nil {
-		return err
-	}
-	if err := writeKeyValueJSON(w, true, "type", "object"); err != nil {
-		return err
-	}
-	if err := writeKeyJSON(w, true, "properties"); err != nil {
-		return err
-	}
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
+	w.KeyValueJSON(true, "title", "Ottawa Recreation Schedules")
+	w.KeyValueJSON(true, "description", "Scraped City of Ottawa recreation schedule data")
+	w.KeyValueJSON(true, "type", "object")
+	w.KeyJSON(true, "properties")
+	w.Byte('{')
 	for i := range typ.NumField() {
 		if i != 0 {
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
+			w.Byte(',')
 		}
 		if err := writeTableJSONSchema(w, typ.Field(i)); err != nil {
 			return fmt.Errorf("write table %s: %w", typ.Field(i).Name, err)
 		}
 	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte('}')
+	w.Byte('}')
+	return w.Err()
 }
 
-func writeTableJSON(w BufferedWriter, typ reflect.StructField, val reflect.Value) error {
+func writeTableJSON(w *stickyBufferedWriter, typ reflect.StructField, val reflect.Value) error {
 	tag, ok := typ.Tag.Lookup("sjson")
 	if !ok || tag == "" {
 		return fmt.Errorf("missing or invalid tag")
@@ -160,16 +127,11 @@ func writeTableJSON(w BufferedWriter, typ reflect.StructField, val reflect.Value
 		}
 	}
 
-	if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), name)); err != nil {
-		return err
-	}
-	if err := w.WriteByte(':'); err != nil {
-		return err
-	}
+	w.KeyJSON(false, name)
 	return writeTableRowsJSON(w, typ.Type, val)
 }
 
-func writeTableJSONSchema(w BufferedWriter, typ reflect.StructField) error {
+func writeTableJSONSchema(w *stickyBufferedWriter, typ reflect.StructField) error {
 	tag, ok := typ.Tag.Lookup("sjson")
 	if !ok || tag == "" {
 		return fmt.Errorf("missing or invalid tag")
@@ -187,85 +149,52 @@ func writeTableJSONSchema(w BufferedWriter, typ reflect.StructField) error {
 		return fmt.Errorf("missing doc tag")
 	}
 
-	if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), name)); err != nil {
-		return err
-	}
-	if err := w.WriteByte(':'); err != nil {
-		return err
-	}
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
-	if err := writeKeyValueJSON(w, false, "type", "array"); err != nil {
-		return err
-	}
-	if err := writeKeyValueJSON(w, true, "description", doc); err != nil {
-		return err
-	}
-	if err := writeKeyJSON(w, true, "items"); err != nil {
-		return err
-	}
+	w.KeyJSON(false, name)
+	w.Byte('{')
+	w.KeyValueJSON(false, "type", "array")
+	w.KeyValueJSON(true, "description", doc)
+	w.KeyJSON(true, "items")
 	if err := writeTableRowsJSONSchema(w, typ.Type); err != nil {
 		return err
 	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte('}')
+	return w.Err()
 }
 
-func writeTableRowsJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
-	if err := w.WriteByte('['); err != nil {
-		return err
-	}
+func writeTableRowsJSON(w *stickyBufferedWriter, typ reflect.Type, val reflect.Value) error {
+	w.Byte('[')
 	if typ.Kind() != reflect.Slice {
 		return fmt.Errorf("unsupported type %s", typ)
 	}
 	for j := range val.Len() {
 		if j != 0 {
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
+			w.Byte(',')
 		}
 		if err := writeRowJSON(w, typ.Elem(), val.Index(j)); err != nil {
 			return fmt.Errorf("write row: %w", err)
 		}
 	}
-	if err := w.WriteByte(']'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte(']')
+	return w.Err()
 }
 
-func writeTableRowsJSONSchema(w BufferedWriter, typ reflect.Type) error {
+func writeTableRowsJSONSchema(w *stickyBufferedWriter, typ reflect.Type) error {
 	if typ.Kind() != reflect.Slice {
 		return fmt.Errorf("unsupported type %s", typ)
 	}
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
-	if err := writeKeyValueJSON(w, false, "type", "object"); err != nil {
-		return err
-	}
-	if err := writeKeyJSON(w, true, "properties"); err != nil {
-		return err
-	}
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
+	w.Byte('{')
+	w.KeyValueJSON(false, "type", "object")
+	w.KeyJSON(true, "properties")
+	w.Byte('{')
 	if err := writeRowJSONSchema(w, typ.Elem()); err != nil {
 		return fmt.Errorf("write row: %w", err)
 	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte('}')
+	w.Byte('}')
+	return w.Err()
 }
 
-func writeRowJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
+func writeRowJSON(w *stickyBufferedWriter, typ reflect.Type, val reflect.Value) error {
 	if typ.Kind() == reflect.Pointer {
 		if val.IsNil() {
 			return fmt.Errorf("is nil")
@@ -276,26 +205,20 @@ func writeRowJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
 	if typ.Kind() != reflect.Struct {
 		return fmt.Errorf("unsupported type %s", typ)
 	}
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
+	w.Byte('{')
 	for k := range typ.NumField() {
 		if k != 0 {
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
+			w.Byte(',')
 		}
 		if err := writeColumnJSON(w, typ.Field(k), val.Field(k)); err != nil {
 			return fmt.Errorf("write column %q: %w", typ.Field(k).Name, err)
 		}
 	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte('}')
+	return w.Err()
 }
 
-func writeRowJSONSchema(w BufferedWriter, typ reflect.Type) error {
+func writeRowJSONSchema(w *stickyBufferedWriter, typ reflect.Type) error {
 	if typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
@@ -304,18 +227,16 @@ func writeRowJSONSchema(w BufferedWriter, typ reflect.Type) error {
 	}
 	for k := range typ.NumField() {
 		if k != 0 {
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
+			w.Byte(',')
 		}
 		if err := writeColumnJSONSchema(w, typ.Field(k)); err != nil {
 			return fmt.Errorf("write column %q: %w", typ.Field(k).Name, err)
 		}
 	}
-	return nil
+	return w.Err()
 }
 
-func writeColumnJSON(w BufferedWriter, typ reflect.StructField, val reflect.Value) error {
+func writeColumnJSON(w *stickyBufferedWriter, typ reflect.StructField, val reflect.Value) error {
 	tag, ok := typ.Tag.Lookup("sjson")
 	if !ok || tag == "" {
 		return fmt.Errorf("missing or invalid tag")
@@ -336,59 +257,47 @@ func writeColumnJSON(w BufferedWriter, typ reflect.StructField, val reflect.Valu
 		}
 	}
 
-	if err := writeKeyJSON(w, false, name); err != nil {
-		return err
-	}
+	w.KeyJSON(false, name)
 
 	if nullzero {
 		switch typ.Type.Kind() {
 		case reflect.Slice, reflect.Pointer:
 			if val.IsNil() {
-				if _, err := w.WriteString("null"); err != nil {
-					return err
-				}
-				return nil
+				w.String("null")
+				return w.Err()
 			}
 		default:
 			if !val.Comparable() {
 				return fmt.Errorf("cannot nullzero if not comparable")
 			}
 			if val.IsZero() {
-				if _, err := w.WriteString("null"); err != nil {
-					return err
-				}
-				return nil
+				w.String("null")
+				return w.Err()
 			}
 		}
 	}
 
 	if typ.Type.Kind() == reflect.Slice {
-		if err := w.WriteByte('['); err != nil {
-			return err
-		}
+		w.Byte('[')
 		for i := range val.Len() {
 			if i != 0 {
-				if err := w.WriteByte(','); err != nil {
-					return err
-				}
+				w.Byte(',')
 			}
 			if err := writeFieldJSON(w, typ.Type.Elem(), val.Index(i)); err != nil {
 				return fmt.Errorf("write field item %s: %w", typ.Name, err)
 			}
 		}
-		if err := w.WriteByte(']'); err != nil {
-			return err
-		}
-		return nil
+		w.Byte(']')
+		return w.Err()
 	}
 
 	if err := writeFieldJSON(w, typ.Type, val); err != nil {
 		return fmt.Errorf("write field %s: %w", typ.Name, err)
 	}
-	return nil
+	return w.Err()
 }
 
-func writeColumnJSONSchema(w BufferedWriter, typ reflect.StructField) error {
+func writeColumnJSONSchema(w *stickyBufferedWriter, typ reflect.StructField) error {
 	tag, ok := typ.Tag.Lookup("sjson")
 	if !ok || tag == "" {
 		return fmt.Errorf("missing or invalid tag")
@@ -416,90 +325,52 @@ func writeColumnJSONSchema(w BufferedWriter, typ reflect.StructField) error {
 
 	pattern, _ := typ.Tag.Lookup("pattern")
 
-	if err := writeKeyJSON(w, false, name); err != nil {
-		return err
-	}
-	if err := w.WriteByte('{'); err != nil {
-		return err
-	}
-	if err := writeKeyValueJSON(w, false, "description", doc); err != nil {
-		return err
-	}
+	w.KeyJSON(false, name)
+	w.Byte('{')
+	w.KeyValueJSON(false, "description", doc)
 	if typ.Type.Kind() == reflect.Slice {
-		if err := writeKeyValueJSON(w, true, "type", "array"); err != nil {
-			return nil
-		}
-		if err := writeKeyJSON(w, true, "items"); err != nil {
-			return nil
-		}
-		if err := w.WriteByte('{'); err != nil {
-			return err
-		}
-		if err := writeKeyJSON(w, false, "type"); err != nil {
-			return nil
-		}
+		w.KeyValueJSON(true, "type", "array")
+		w.KeyJSON(true, "items")
+		w.Byte('{')
+		w.KeyJSON(false, "type")
 		if err := writeFieldJSONSchema(w, typ.Type.Elem(), nullzero); err != nil {
 			return fmt.Errorf("write field item %s: %w", typ.Name, err)
 		}
 		if pattern != "" {
-			if err := writeKeyValueJSON(w, true, "pattern", pattern); err != nil {
-				return err
-			}
+			w.KeyValueJSON(true, "pattern", pattern)
 		}
-		if err := w.WriteByte('}'); err != nil {
-			return err
-		}
+		w.Byte('}')
 	} else {
-		if err := writeKeyJSON(w, true, "type"); err != nil {
-			return nil
-		}
+		w.KeyJSON(true, "type")
 		if err := writeFieldJSONSchema(w, typ.Type, nullzero); err != nil {
 			return fmt.Errorf("write field %s: %w", typ.Name, err)
 		}
 		if pattern != "" {
-			if err := writeKeyValueJSON(w, true, "pattern", pattern); err != nil {
-				return err
-			}
+			w.KeyValueJSON(true, "pattern", pattern)
 		}
 	}
-	if err := w.WriteByte('}'); err != nil {
-		return err
-	}
-	return nil
+	w.Byte('}')
+	return w.Err()
 }
 
-func writeFieldJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
+func writeFieldJSON(w *stickyBufferedWriter, typ reflect.Type, val reflect.Value) error {
 	switch typ.Kind() {
 	case reflect.String:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), val.Interface().(string))); err != nil {
-			return err
-		}
+		w.StringJSON(val.Interface().(string))
 	case reflect.Bool:
 		if val.Bool() {
-			if _, err := w.WriteString("true"); err != nil {
-				return err
-			}
+			w.String("true")
 		} else {
-			if _, err := w.WriteString("false"); err != nil {
-				return err
-			}
+			w.String("false")
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if _, err := w.Write(strconv.AppendInt(w.AvailableBuffer(), val.Int(), 10)); err != nil {
-			return err
-		}
+		w.Int(val.Int(), 10)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if _, err := w.Write(strconv.AppendUint(w.AvailableBuffer(), val.Uint(), 10)); err != nil {
-			return err
-		}
+		w.Uint(val.Uint(), 10)
 	case reflect.Float32:
-		if _, err := w.Write(strconv.AppendFloat(w.AvailableBuffer(), val.Float(), 'f', -1, 32)); err != nil {
-			return err
-		}
+		w.Float(val.Float(), 'f', -1, 32)
 	case reflect.Float64:
-		if _, err := w.Write(strconv.AppendFloat(w.AvailableBuffer(), val.Float(), 'f', -1, 64)); err != nil {
-			return err
-		}
+		w.Float(val.Float(), 'f', -1, 64)
 	case reflect.Struct:
 		switch colVal := val.Interface().(type) {
 		default:
@@ -509,40 +380,26 @@ func writeFieldJSON(w BufferedWriter, typ reflect.Type, val reflect.Value) error
 	default:
 		return fmt.Errorf("unsupported type %s", typ)
 	}
-	return nil
+	return w.Err()
 }
 
-func writeFieldJSONSchema(w BufferedWriter, typ reflect.Type, nullable bool) error {
+func writeFieldJSONSchema(w *stickyBufferedWriter, typ reflect.Type, nullable bool) error {
 	if nullable {
-		if err := w.WriteByte('['); err != nil {
-			return err
-		}
+		w.Byte('[')
 	}
 	switch typ.Kind() {
 	case reflect.String:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "string")); err != nil {
-			return err
-		}
+		w.StringJSON("string")
 	case reflect.Bool:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "boolean")); err != nil {
-			return err
-		}
+		w.StringJSON("boolean")
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "integer")); err != nil {
-			return err
-		}
+		w.StringJSON("integer")
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "integer")); err != nil {
-			return err
-		}
+		w.StringJSON("integer")
 	case reflect.Float32:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "number")); err != nil {
-			return err
-		}
+		w.StringJSON("number")
 	case reflect.Float64:
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "number")); err != nil {
-			return err
-		}
+		w.StringJSON("number")
 	case reflect.Struct:
 		switch reflect.New(typ).Elem().Interface().(type) {
 		default:
@@ -552,47 +409,29 @@ func writeFieldJSONSchema(w BufferedWriter, typ reflect.Type, nullable bool) err
 		return fmt.Errorf("unsupported type %s", typ)
 	}
 	if nullable {
-		if err := w.WriteByte(','); err != nil {
-			return err
-		}
-		if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), "null")); err != nil {
-			return err
-		}
-		if err := w.WriteByte(']'); err != nil {
-			return err
-		}
+		w.Byte(',')
+		w.StringJSON("null")
+		w.Byte(']')
 	}
-	return nil
+	return w.Err()
 }
 
-func writeKeyJSON(w BufferedWriter, comma bool, key string) error {
+func (w *stickyBufferedWriter) KeyJSON(comma bool, key string) {
 	if comma {
-		if err := w.WriteByte(','); err != nil {
-			return err
-		}
+		w.Byte(',')
 	}
-	if _, err := w.Write(appendStringJSON(w.AvailableBuffer(), key)); err != nil {
-		return err
-	}
-	if err := w.WriteByte(':'); err != nil {
-		return err
-	}
-	return nil
+	w.StringJSON(key)
+	w.Byte(':')
 }
 
-func writeKeyValueJSON(w BufferedWriter, comma bool, key string, value any) error {
-	val := reflect.ValueOf(value)
-	typ := val.Type()
-	if err := writeKeyJSON(w, comma, key); err != nil {
-		return err
-	}
-	if err := writeFieldJSON(w, typ, val); err != nil {
-		return err
-	}
-	return nil
+func (w *stickyBufferedWriter) KeyValueJSON(comma bool, key string, value string) {
+	w.KeyJSON(comma, key)
+	w.StringJSON(value)
 }
 
-// TODO: support writing json schema
+func (w *stickyBufferedWriter) StringJSON(s string) {
+	w.Write(appendStringJSON(w.AvailableBuffer(), s))
+}
 
 // jsonSafeSet is encoding/json.safeSet.
 var jsonSafeSet = [utf8.RuneSelf]bool{

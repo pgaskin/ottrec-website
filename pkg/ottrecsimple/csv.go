@@ -7,7 +7,6 @@ import (
 	"iter"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -27,7 +26,7 @@ func CSV(x *Data) iter.Seq2[string, []byte] {
 		var err error
 		for table, val := range iterTablesCSV(x)(&err) {
 			typ := val.Type()
-			if err := writeTableRowsCSV(&buf, typ, val); err != nil {
+			if err := writeTableRowsCSV(newStickyBufferedWriter(&buf), typ, val); err != nil {
 				panic(err)
 			}
 			if !yield(table, slices.Clone(buf.Bytes())) {
@@ -53,7 +52,7 @@ func TableCSV[T Row](x Table[T]) []byte {
 	val := reflect.ValueOf(x)
 	typ := val.Type()
 	var buf bytes.Buffer
-	if err := writeTableRowsCSV(&buf, typ, val); err != nil {
+	if err := writeTableRowsCSV(newStickyBufferedWriter(&buf), typ, val); err != nil {
 		panic(err)
 	}
 	return buf.Bytes()
@@ -67,7 +66,7 @@ func WriteCSV(x *Data, fn func(string) io.Writer) error {
 	for table, val := range iterTablesCSV(x)(&err) {
 		typ := val.Type()
 		if w := fn(table); w != nil {
-			if err := writeTableRowsCSV(newBufferedWriter(w), typ, val); err != nil {
+			if err := writeTableRowsCSV(newStickyBufferedWriter(newBufferedWriter(w)), typ, val); err != nil {
 				return fmt.Errorf("write table %s: %w", table, err)
 			}
 		}
@@ -79,19 +78,19 @@ func WriteCSV(x *Data, fn func(string) io.Writer) error {
 }
 
 func WriteCSVSchema(w io.Writer) error {
-	return writeDataCSVSchema(newBufferedWriter(w), new(Data))
+	return writeDataCSVSchema(newStickyBufferedWriter(newBufferedWriter(w)), new(Data))
 }
 
 func WriteTableCSV[T Row](x Table[T], w io.Writer) error {
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeTableRowsCSV(newBufferedWriter(w), typ, val)
+	return writeTableRowsCSV(newStickyBufferedWriter(newBufferedWriter(w)), typ, val)
 }
 
 func WriteRowCSV[T Row](x *T, w io.Writer) error {
 	val := reflect.ValueOf(x)
 	typ := val.Type()
-	return writeRowCSV(newBufferedWriter(w), typ, val, false)
+	return writeRowCSV(newStickyBufferedWriter(newBufferedWriter(w)), typ, val, false)
 }
 
 func iterTablesCSV(x any) func(*error) iter.Seq2[string, reflect.Value] {
@@ -134,18 +133,15 @@ func iterTablesCSV(x any) func(*error) iter.Seq2[string, reflect.Value] {
 	}
 }
 
-func writeDataCSVSchema(w BufferedWriter, x any) error {
-	if _, err := w.WriteString(`table,column,description`); err != nil {
-		return nil
-	}
+func writeDataCSVSchema(w *stickyBufferedWriter, x any) error {
+	w.StringCSV(false, "table")
+	w.StringCSV(true, "column")
+	w.StringCSV(true, "description")
 	if crlfCSV {
-		if err := w.WriteByte('\r'); err != nil {
-			return err
-		}
+		w.Byte('\r')
 	}
-	if err := w.WriteByte('\n'); err != nil {
-		return err
-	}
+	w.Byte('\n')
+
 	var err error
 	for table, val := range iterTablesCSV(x)(&err) {
 		typ := val.Type()
@@ -167,35 +163,23 @@ func writeDataCSVSchema(w BufferedWriter, x any) error {
 				return fmt.Errorf("table %q: missing doc tag", table)
 			}
 
-			if err := writeStringCSV(w, table); err != nil {
-				return err
-			}
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
-			if err := writeStringCSV(w, name); err != nil {
-				return err
-			}
-			if err := w.WriteByte(','); err != nil {
-				return err
-			}
-			if err := writeStringCSV(w, doc); err != nil {
-				return err
-			}
+			w.StringCSV(false, table)
+			w.StringCSV(true, name)
+			w.StringCSV(true, doc)
 			if crlfCSV {
-				if err := w.WriteByte('\r'); err != nil {
-					return err
-				}
+				w.Byte('\r')
 			}
-			if err := w.WriteByte('\n'); err != nil {
-				return err
-			}
+			w.Byte('\n')
 		}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	return w.Err()
 }
 
-func writeTableRowsCSV(w BufferedWriter, typ reflect.Type, val reflect.Value) error {
+func writeTableRowsCSV(w *stickyBufferedWriter, typ reflect.Type, val reflect.Value) error {
 	if typ.Kind() != reflect.Slice {
 		return fmt.Errorf("unsupported type %s", typ)
 	}
@@ -209,10 +193,10 @@ func writeTableRowsCSV(w BufferedWriter, typ reflect.Type, val reflect.Value) er
 			return fmt.Errorf("write row: %w", err)
 		}
 	}
-	return nil
+	return w.Err()
 }
 
-func writeRowCSV(w BufferedWriter, typ reflect.Type, val reflect.Value, header bool) error {
+func writeRowCSV(w *stickyBufferedWriter, typ reflect.Type, val reflect.Value, header bool) error {
 	if typ.Kind() == reflect.Pointer {
 		if val.IsNil() {
 			return fmt.Errorf("is nil")
@@ -225,27 +209,21 @@ func writeRowCSV(w BufferedWriter, typ reflect.Type, val reflect.Value, header b
 	}
 	for k := range typ.NumField() {
 		if k != 0 {
-			if err := w.WriteByte(byte(commaCSV)); err != nil {
-				return err
-			}
+			w.Byte(commaCSV)
 		}
 		if err := writeColumnCSV(w, typ.Field(k), val.Field(k), header); err != nil {
 			return fmt.Errorf("write column %q: %w", typ.Field(k).Name, err)
 		}
 	}
 	if crlfCSV {
-		if err := w.WriteByte('\r'); err != nil {
-			return err
-		}
+		w.Byte('\r')
 	}
-	if err := w.WriteByte('\n'); err != nil {
-		return err
-	}
+	w.Byte('\n')
 
-	return nil
+	return w.Err()
 }
 
-func writeColumnCSV(w BufferedWriter, typ reflect.StructField, val reflect.Value, header bool) error {
+func writeColumnCSV(w *stickyBufferedWriter, typ reflect.StructField, val reflect.Value, header bool) error {
 	tag, ok := typ.Tag.Lookup("scsv")
 	if !ok || tag == "" {
 		return fmt.Errorf("missing or invalid tag")
@@ -267,92 +245,73 @@ func writeColumnCSV(w BufferedWriter, typ reflect.StructField, val reflect.Value
 	}
 
 	if header {
-		if err := writeStringCSV(w, name); err != nil {
-			return err
-		}
-		return nil
+		w.StringCSV(false, name)
+		return w.Err()
 	}
 
 	if emptyzero {
 		switch typ.Type.Kind() {
 		case reflect.Slice, reflect.Pointer:
 			if val.IsNil() {
-				return nil
+				return w.Err()
 			}
 		default:
 			if !val.Comparable() {
 				return fmt.Errorf("cannot nullzero if not comparable")
 			}
 			if val.IsZero() {
-				return nil
+				return w.Err()
 			}
 		}
 	}
 
 	if typ.Type.Kind() == reflect.Slice {
 		if val.Len() != 0 {
-			if err := w.WriteByte('"'); err != nil {
-				return err
-			}
+			w.Byte('"')
 			for i := range val.Len() {
 				if i != 0 {
-					if err := w.WriteByte(','); err != nil {
-						return err
-					}
+					w.Byte(',')
 				}
 				if err := writeFieldCSV(w, typ.Type.Elem(), val.Index(i), true); err != nil {
 					return fmt.Errorf("write field item %s: %w", typ.Name, err)
 				}
 			}
-			if err := w.WriteByte('"'); err != nil {
-				return err
-			}
+			w.Byte('"')
 		}
-		return nil
+		return w.Err()
 	}
 
 	if err := writeFieldCSV(w, typ.Type, val, false); err != nil {
 		return fmt.Errorf("write field %s: %w", typ.Name, err)
 	}
-	return nil
+	return w.Err()
 }
 
-func writeFieldCSV(w BufferedWriter, typ reflect.Type, val reflect.Value, arr bool) error {
+func writeFieldCSV(w *stickyBufferedWriter, typ reflect.Type, val reflect.Value, arr bool) error {
 	switch typ.Kind() {
 	case reflect.String:
 		if arr {
 			if strings.ContainsRune(val.Interface().(string), ',') {
 				return fmt.Errorf("array item %q contains comma", val.Interface().(string))
 			}
-			return writeStringQuotedCSV(w, val.Interface().(string))
+			w.StringInQuotesCSV(val.Interface().(string))
+		} else {
+			w.StringCSV(false, val.Interface().(string))
 		}
-		return writeStringCSV(w, val.Interface().(string))
 	case reflect.Bool:
 		if val.Bool() {
-			if _, err := w.WriteString("1"); err != nil {
-				return err
-			}
+			w.Byte('1')
 		} else {
-			if _, err := w.WriteString("0"); err != nil {
-				return err
-			}
+			w.Byte('0')
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if _, err := w.Write(strconv.AppendInt(w.AvailableBuffer(), val.Int(), 10)); err != nil {
-			return err
-		}
+		w.Int(val.Int(), 10)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if _, err := w.Write(strconv.AppendUint(w.AvailableBuffer(), val.Uint(), 10)); err != nil {
-			return err
-		}
+		w.Uint(val.Uint(), 10)
 	case reflect.Float32:
-		if _, err := w.Write(strconv.AppendFloat(w.AvailableBuffer(), val.Float(), 'f', -1, 32)); err != nil {
-			return err
-		}
+		w.Float(val.Float(), 'f', -1, 32)
 	case reflect.Float64:
-		if _, err := w.Write(strconv.AppendFloat(w.AvailableBuffer(), val.Float(), 'f', -1, 64)); err != nil {
-			return err
-		}
+		w.Float(val.Float(), 'f', -1, 64)
 	case reflect.Struct:
 		switch colVal := val.Interface().(type) {
 		default:
@@ -362,32 +321,25 @@ func writeFieldCSV(w BufferedWriter, typ reflect.Type, val reflect.Value, arr bo
 	default:
 		return fmt.Errorf("unsupported type %s", typ)
 	}
-	return nil
+	return w.Err()
 }
 
 // writeStringCSV is based on encoding/csv.Writer.Write
-func writeStringCSV(w BufferedWriter, field string) error {
+func (w *stickyBufferedWriter) StringCSV(comma bool, field string) {
+	if comma {
+		w.Byte(',')
+	}
 	if !fieldNeedsQuotesCSV(field, commaCSV) {
-		if _, err := w.WriteString(field); err != nil {
-			return err
-		}
-		return nil
+		w.String(field)
+	} else {
+		w.Byte('"')
+		w.StringInQuotesCSV(field)
+		w.Byte('"')
 	}
-
-	if err := w.WriteByte('"'); err != nil {
-		return err
-	}
-	if err := writeStringQuotedCSV(w, field); err != nil {
-		return err
-	}
-	if err := w.WriteByte('"'); err != nil {
-		return err
-	}
-	return nil
 }
 
 // writeStringQuotedCSV is based on encoding/csv.Writer.Write
-func writeStringQuotedCSV(w BufferedWriter, field string) error {
+func (w *stickyBufferedWriter) StringInQuotesCSV(field string) {
 	for len(field) > 0 {
 		// Search for special characters.
 		i := strings.IndexAny(field, "\"\r\n")
@@ -396,35 +348,28 @@ func writeStringQuotedCSV(w BufferedWriter, field string) error {
 		}
 
 		// Copy verbatim everything before the special character.
-		if _, err := w.WriteString(field[:i]); err != nil {
-			return err
-		}
+		w.String(field[:i])
 		field = field[i:]
 
 		// Encode the special character.
 		if len(field) > 0 {
-			var err error
 			switch field[0] {
 			case '"':
-				_, err = w.WriteString(`""`)
+				w.String(`""`)
 			case '\r':
 				if crlfCSV {
-					err = w.WriteByte('\r')
+					w.Byte('\r')
 				}
 			case '\n':
 				if crlfCSV {
-					_, err = w.WriteString("\r\n")
+					w.String("\r\n")
 				} else {
-					err = w.WriteByte('\n')
+					w.Byte('\n')
 				}
 			}
 			field = field[1:]
-			if err != nil {
-				return err
-			}
 		}
 	}
-	return nil
 }
 
 // fieldNeedsQuotesCSV is based on encoding/csv.Writer.fieldNeedsQuotes
