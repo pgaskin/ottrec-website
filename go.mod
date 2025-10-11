@@ -11,6 +11,7 @@ require (
 	github.com/lmittmann/tint v1.1.2
 	github.com/ncruces/go-sqlite3 v0.29.1
 	github.com/pgaskin/ottrec v0.0.0-20251007032526-ab79bc674a9a
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/net v0.44.0
 	google.golang.org/protobuf v1.36.10
