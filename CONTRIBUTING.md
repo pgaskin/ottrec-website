@@ -76,6 +76,7 @@ go generate ./ottrec/schema
 #### Running it locally with automatic restart
 
 ```bash
+export DEBUG_POSTCSS_NOOP=1 # optional: don't process stylesheets with postcss
 env -C website watchexec --clear --debounce 1s -f '*.templ' --watch ./templates 'go generate ./templates'
 env -C website watchexec --clear --debounce 1s -i '*.templ' --restart 'go run ./cmd/ottrec-data' # http://data.ottrec.localhost:8082/
 env -C website watchexec --clear --debounce 1s -i '*.templ' --restart 'go run ./cmd/ottrec-website' # http://ottrec.localhost:8083/
