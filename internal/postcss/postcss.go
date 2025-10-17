@@ -4,14 +4,14 @@ package postcss
 import (
 	_ "embed"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
-	"github.com/dop251/goja"
+	"github.com/fastschema/qjs"
 )
 
 // I do the frontend CSS this way since we're primarly server-rendered, and this
@@ -23,14 +23,15 @@ var bundleJS []byte
 
 var wrapperJS = `
 	const { postcss, postcssPresetEnv } = bundle
-	
-	function transform(css, browsers) {
+
+	async function transform(css, browsers) {
 		const proc = postcss([
 			postcssPresetEnv({
 				browsers: [browsers],
 			}),
 		])
-		return proc.process(css).then(res => res.css)
+		const res = await proc.process(css)
+		return res.css
 	}
 `
 
@@ -43,37 +44,65 @@ func init() {
 		return
 	}
 	slog.Info("initializing postcss")
-	vm := goja.New()
-	if err := initialize(vm); err != nil {
-		panic(fmt.Errorf("postcss: initialize: %w", err))
+
+	vm, err := qjs.New()
+	if err != nil {
+		panic(fmt.Errorf("postcss: initialize: quickjs: %w", err))
 	}
-	fn, ok := goja.AssertFunction(vm.GlobalObject().Get("transform"))
-	if !ok {
-		panic(fmt.Errorf("postcss: initialize: transform is not a function"))
+	vm.Context().SetFunc("btoa", func(ctx *qjs.This) (*qjs.Value, error) {
+		if len(ctx.Args()) <= 1 {
+			return nil, fmt.Errorf("missing argument")
+		}
+		src := ctx.Args()[1].String()
+		res := base64.StdEncoding.EncodeToString([]byte(src))
+		return ctx.Context().NewString(res), nil
+	})
+	vm.Context().SetFunc("atob", func(ctx *qjs.This) (*qjs.Value, error) {
+		if len(ctx.Args()) <= 1 {
+			return nil, fmt.Errorf("missing argument")
+		}
+		src := ctx.Args()[1].String()
+		res, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(src, "="))
+		if err != nil {
+			return nil, err
+		}
+		return ctx.Context().NewString(string(res)), nil
+	})
+	if _, err := vm.Eval("bundle.js", qjs.Code(string(bundleJS))); err != nil {
+		panic(fmt.Errorf("postcss: initialize: bundle: %w", err))
 	}
+	if _, err := vm.Eval("wrapper.js", qjs.Code(string(wrapperJS))); err != nil {
+		panic(fmt.Errorf("postcss: initialize: bundle: %w", err))
+	}
+
 	var mu sync.Mutex // the initialization and per-instance cost of each new instance far exceeds the time to do a single transform
 	transform = func(css, browsers string) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		res, err := fn(nil, vm.ToValue(css), vm.ToValue(browsers))
+
+		cssObj := vm.Context().NewString(css)
+		defer cssObj.Free()
+
+		browsersObj := vm.Context().NewString(browsers)
+		defer browsersObj.Free()
+
+		res, err := vm.Context().Global().InvokeJS("transform", cssObj, browsersObj)
 		if err != nil {
-			return "", fullException(err)
+			return "", err
 		}
-		promise, ok := res.Export().(*goja.Promise)
-		if !ok {
-			panic("transform did not return a promise")
+		//defer res.Free() // this causes a wasm segfault for some reason (idk if the problem is in qjs or how I'm using it)
+
+		res, err = res.Await()
+		if err != nil {
+			return "", err
 		}
-		switch promise.State() {
-		case goja.PromiseStateFulfilled:
-			return promise.Result().String(), nil
-		case goja.PromiseStateRejected:
-			return "", errors.New(promise.Result().String())
-		default:
-			panic("promise not fulfilled") // this should never happen since we don't have an event loop
-		}
+		defer res.Free()
+
+		return res.String(), nil
 	}
+
 	// the first one takes a while
-	if _, err := transform("", "defaults"); err != nil {
+	if _, err := transform("html{}", "defaults"); err != nil {
 		panic(fmt.Errorf("postcss: initialize: transform: %w", err))
 	}
 	slog.Info("postcss initialized")
@@ -84,32 +113,4 @@ func Transform(css, browsers string) (string, error) {
 		return css, nil
 	}
 	return transform(css, browsers)
-}
-
-func initialize(vm *goja.Runtime) error {
-	if err := errors.Join(
-		vm.GlobalObject().Set("btoa", func(call goja.FunctionCall) goja.Value {
-			return vm.ToValue(base64.RawStdEncoding.EncodeToString([]byte(call.Arguments[0].String())))
-		}),
-		vm.GlobalObject().Set("atob", func(call goja.FunctionCall) (goja.Value, error) {
-			str, err := base64.RawStdEncoding.DecodeString(call.Arguments[0].String())
-			return vm.ToValue(string(str)), err
-		}),
-	); err != nil {
-		return fmt.Errorf("polyfills: %w", fullException(err))
-	}
-	if _, err := vm.RunScript("bundle.js", string(bundleJS)); err != nil {
-		return fmt.Errorf("bundle: %w", fullException(err))
-	}
-	if _, err := vm.RunScript("wrapper.js", wrapperJS); err != nil {
-		return fmt.Errorf("wrapper: %w", fullException(err))
-	}
-	return nil
-}
-
-func fullException(err error) error {
-	if xx, ok := err.(*goja.Exception); ok {
-		return errors.New(xx.String())
-	}
-	return err
 }
