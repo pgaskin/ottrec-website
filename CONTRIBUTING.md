@@ -25,6 +25,33 @@ alias ottrec-root='dirname "$(go env GOWORK)"'
 alias croot='cd "$(ottrec-root)"'
 ```
 
+#### VSCode extensions
+
+- [`golang.go`](https://marketplace.visualstudio.com/items?itemName=golang.Go)
+- [`a-h.templ`](https://marketplace.visualstudio.com/items?itemName=a-h.templ)
+- [`pbkit.vscode-pbkit`](https://marketplace.visualstudio.com/items?itemName=pbkit.vscode-pbkit)
+- [`aaron-bond.better-comments`](https://marketplace.visualstudio.com/items?itemName=aaron-bond.better-comments)
+- [`dnut.rewrap-revived`](https://marketplace.visualstudio.com/items?itemName=dnut.rewrap-revived) - for rewrapping comments (Alt+A)
+- [`yo1dog.cursor-align`](https://marketplace.visualstudio.com/items?itemName=yo1dog.cursor-align)
+
+#### VSCode settings
+
+```jsonc
+{
+    "[go]": {
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        },
+        "editor.formatOnSave": true,
+    },
+    "[templ]": {
+        "editor.defaultFormatter": "a-h.templ",
+        "editor.formatOnSave": true,
+        "editor.wordWrap": "on",
+    },
+}
+```
+
 ### Scraper
 
 #### Running the unit tests
