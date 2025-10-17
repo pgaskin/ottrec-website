@@ -1,3 +1,4 @@
 static/fonts/* linguist-vendored
 static/lib/* linguist-vendored
+internal/postcss/bundle.js linguist-vendored
 templates/*_templ.go linguist-generated
