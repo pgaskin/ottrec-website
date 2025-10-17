@@ -27,6 +27,7 @@ import (
 	"github.com/pgaskin/ottrec-website/pkg/ottrecexp"
 	"github.com/pgaskin/ottrec-website/pkg/ottrecidx"
 	"github.com/pgaskin/ottrec-website/static"
+	"github.com/pgaskin/ottrec-website/templates"
 )
 
 type DataConfig struct {
@@ -44,9 +45,13 @@ func Data(cfg DataConfig) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 
-	// TODO: homepage, api doc
 	// TODO: visual low-level historical diff? maybe this should be a separate service?
 
+	mux.Handle("/", &dataHomeHandler{
+		Host:                  cfg.Host,
+		Cache:                 cfg.Cache,
+		MaxHistoricalVersions: 50,
+	})
 	mux.Handle("/v1/", &dataAPIv1{
 		Base:  "/v1/",
 		Cache: cfg.Cache,
@@ -62,6 +67,55 @@ func Data(cfg DataConfig) (http.Handler, error) {
 	dataExportSchemaJSON()
 
 	return commonMiddleware(mux), nil
+}
+
+type dataHomeHandler struct {
+	Host                  string
+	Cache                 *ottrecdata.Cache
+	MaxHistoricalVersions int
+}
+
+func (h *dataHomeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Vary", "Accept-Encoding")
+
+	if r.URL.RawQuery != "" {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, r.URL.EscapedPath(), http.StatusTemporaryRedirect)
+		return
+	}
+
+	latest, _, _, err := h.Cache.ResolveVersion(r.Context(), "latest")
+	if err != nil {
+		slog.Error("data: failed to resolve latest version", "error", err)
+		h.serveError(w, "internal server error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := templates.Render(w, r, templates.WebsiteErrorPage, latest, func() (c templ.Component, status int, err error) {
+		versions := slices.Collect(iterLimit(h.Cache.DataVersions(r.Context())(&err), h.MaxHistoricalVersions))
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("get data versions: %w", err)
+		}
+		if len(versions) == 0 {
+			return nil, http.StatusServiceUnavailable, fmt.Errorf("data not available, try again later")
+		}
+		return templates.DataHome(templates.DataHomeParams{
+			Canonical: reqScheme(r) + "://" + h.Host + "/",
+			Latest:    versions[0],
+			Versions:  versions,
+		}), http.StatusOK, nil
+	}); err != nil {
+		slog.Error("data: failed to render page", "url", r.URL.String(), "error", err)
+	}
+}
+
+func (h *dataHomeHandler) serveError(w http.ResponseWriter, message string, code int) {
+	d := w.Header()
+	d.Set("Content-Length", strconv.Itoa(len(message)+1))
+	d.Set("Content-Type", "text/plain; charset=utf-8")
+	d.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	io.WriteString(w, message+"\n")
 }
 
 type dataExportHandler struct {
