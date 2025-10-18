@@ -23,7 +23,7 @@ func TestPostCSS(t *testing.T) {
 	t.Run("Simple", func(t *testing.T) {
 		if res, err := Transform(`html { body { color: rgb(0 0 100% / 90%); @media print { color: #fff } } }`, "chrome 50"); err != nil {
 			t.Errorf("unexpected error: %v", err)
-		} else if res != " html body { color: rgba(0, 0, 255, 0.9); }\n@media print {\n html body { color: #fff; } }" {
+		} else if res != "html body{color:rgba(0,0,255,0.9)}@media print{html body{color:#fff}}" {
 			t.Errorf("incorrect result: %q", res) // note: this may need to be updated if postcss is upgraded
 		}
 	})
