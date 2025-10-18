@@ -1,0 +1,241 @@
+package templates
+
+import (
+	"reflect"
+	"strconv"
+
+	"github.com/pgaskin/ottrec-website/pkg/ottrecdata"
+	"github.com/pgaskin/ottrec-website/pkg/ottrecexp"
+	"github.com/pgaskin/ottrec-website/static"
+)
+
+type DataHomeParams struct {
+	Canonical string
+	Latest    ottrecdata.DataVersion
+	Versions  []ottrecdata.DataVersion
+}
+
+templ DataHome(params DataHomeParams) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			if params.Canonical != "" {
+				<link rel="canonical" href={ params.Canonical }/>
+			}
+			<base href="/"/>
+			// TODO: favicon
+			<link rel="stylesheet" href={ static.Path(static.DataCSS) }/>
+			<title>Ottawa recreation schedule data</title>
+			<meta name="description" content="Download up-to-date JSON and CSV datasets of the City of Ottawa's drop-in recreation schedules."/>
+		</head>
+		<body>
+			<header>
+				<h1>Ottawa recreation schedule data</h1>
+			</header>
+			<section id="about">
+				<p>
+					This page provides an unofficial dataset of the City of Ottawa drop-in recreation schedules, updated daily.
+				</p>
+				<p>
+					If you encounter any problems or inaccurate data, please <a href="https://github.com/pgaskin/ottrec/issues/new">open an issue</a>.
+				</p>
+				<p>
+					The data was last updated on { params.Latest.Updated.Format("2006-01-02") }.
+				</p>
+			</section>
+			<section id="simplified">
+				<h1>Simplified dataset</h1>
+				<p>
+					This format contains drop-in recreation facilities and activity times, with fully-parsed dates/times, cleaned titles, and inferred reservation requirements. It is available as JSON or CSV, along with a fully-documented stable schema.
+				</p>
+				<table class="simple-formats">
+					<thead>
+						<tr>
+							<th>Format</th>
+							<th>Download</th>
+							<th>Schema</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr>
+							<td>JSON</td>
+							<td><a href="/export/latest.json" download="ottrec_simplified_latest.json">json</a></td>
+							<td><a href="/export/schema.json" download="ottrec_simplified.schema.json">schema.json</a></td>
+						</tr>
+						<tr>
+							<td>CSV</td>
+							<td><a href="/export/latest.csv.zip" download="ottrec_simplified_latest.csv.zip">csv.zip</a></td>
+							<td><a href="/export/schema.csv" download="ottrec_simplified.schema.csv">schema.csv</a></td>
+						</tr>
+					</tbody>
+				</table>
+				<table class="schema">
+					<tbody>
+						<tr class="controls">
+							<td colspan="2">
+								<select class="format">
+									<option value="" selected>Format</option>
+									<option value="json">JSON</option>
+									<option value="csv">CSV</option>
+								</select>
+							</td>
+						</tr>
+						{{ data := reflect.TypeFor[ottrecexp.Data]() }}
+						for i := range data.NumField() {
+							{{ table := data.Field(i) }}
+							<tr class="schema-table">
+								<th>
+									<span data-format="">{ table.Name }</span>
+									<span data-format="json">{ cutBefore(table.Tag.Get("sjson"), ",") }</span>
+									<span data-format="csv">{ cutBefore(table.Tag.Get("scsv"), ",") }</span>
+								</th>
+								<th>{ table.Tag.Get("doc") }</th>
+							</tr>
+							{{ row := table.Type.Elem().Elem() }}
+							for j := range row.NumField() {
+								{{ col := row.Field(j) }}
+								<tr class="schema-column">
+									<th>
+										<span data-format="">{ col.Name }</span>
+										<span data-format="json">{ cutBefore(col.Tag.Get("sjson"), ",") }</span>
+										<span data-format="csv">{ cutBefore(col.Tag.Get("scsv"), ",") }</span>
+									</th>
+									<td>{ col.Tag.Get("doc") }</td>
+								</tr>
+							}
+						}
+					</tbody>
+				</table>
+			</section>
+			<section id="raw">
+				<h1>Raw dataset</h1>
+				<p>
+					This format is designed to match the structure of the website as closely as possible with minimal processing and no assumptions. This make it more complex to use correctly, but preserves all information from the website.
+				</p>
+				<table class="raw-formats">
+					<thead>
+						<tr>
+							<th>Download</th>
+							<th>Description</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr>
+							<td><a href="/v1/latest/proto" download={ "ottrec_raw_latest.proto" }>proto</a></td>
+							<td>Protobuf schema.</td>
+						</tr>
+						<tr>
+							<td><a href="/v1/latest/pb" download={ "ottrec_raw_latest.pb" }>pb</a></td>
+							<td>Binary protobuf. Best for long-term usage. Forwards and backwards compatible.</td>
+						</tr>
+						<tr>
+							<td><a href="/v1/latest/json" download={ "ottrec_raw_latest.json" }>json</a></td>
+							<td>JSON protobuf. Intended for ad-hoc queries. Not stable.</td>
+						</tr>
+						<tr>
+							<td><a href="/v1/latest/textpb" download={ "ottrec_raw_latest.textpb" }>textpb</a></td>
+							<td>Text protobuf. Intended for manual inspection.</td>
+						</tr>
+					</tbody>
+				</table>
+			</section>
+			<section id="api">
+				<h1>API</h1>
+				<h2>Version specs</h2>
+				<dl class="api">
+					<dt>latest</dt>
+					<dd>Newest available data.</dd>
+					<dt>latest-<span class="param">N</span></dt>
+					<dd>N versions before the newest available data.</dd>
+					<dt><span class="param">YYYY</span>-<span class="param">MM</span></dt>
+					<dt><span class="param">YYYY</span>-<span class="param">MM</span>-<span class="param">DD</span></dt>
+					<dd>Newest available data at the end of the specified date.</dd>
+					<dt><span class="param">ID</span></dt>
+					<dd>Canonical reference to a specific revision of the data.</dd>
+				</dl>
+				<h2>Export</h2>
+				<dl class="api">
+					<dt>/export/schema.json</dt>
+					<dt>/export/schema.csv</dt>
+					<dd>The current schema for the simplified dataset.</dd>
+					<dt>/export/<span class="param">:spec</span>.json</dt>
+					<dt>/export/<span class="param">:spec</span>.csv.zip</dt>
+					<dd>Download a simplified dataset. Historical data may not be available beyond a cut-off date if the underlying data format changes too much.</dd>
+				</dl>
+				<p>
+					The API is stable, but the data schema is subject to change if required.
+				</p>
+				<h2>Raw (v1)</h2>
+				<dl class="api">
+					<dt>/v1/<span class="opt">?limit=<span class="param">N</span></span><span class="opt">&after=<span class="param">ID</span></span><span class="opt">&revisions=<span class="param">true|false</span></span></dt>
+					<dd>
+						A JSON array of available data, in descending order by date/revision. If <code>revisions</code> is not set to true, only the most recent revision for each date will be listed. The default and maximum per-page limit is subject to change. Each one is uniquely identified by the ID. The revision is incremented for every additional update to the data for a specific date. You can call this endpoint repeatedly with the last ID on the previous page until an empty array is returned.
+						<pre>{ `[{"id": string, "revision": integer,"updated": date-rfc3339}]` }</pre>
+					</dd>
+					<dt>/v1/<span class="param">:spec</span></dt>
+					<dt>/v1/<span class="param">:spec</span>/<span class="param">:format</span></dt>
+					<dd>Download a raw dataset in the specified format. Currently, the valid formats are proto, pb, textpb, or json.</dd>
+				</dl>
+				<p>
+					If the protobuf schema changes in a way which breaks backwards/forwards-compatible decoding, a new /v2/ api will be introduced for data beyond that point.
+				</p>
+			</section>
+			if len(params.Versions) != 0 {
+				<section id="history">
+					<h1>Historical data</h1>
+					<table class="history">
+						<thead>
+							<th>Version</th>
+							<th>Simplified</th>
+							<th>Raw</th>
+						</thead>
+						<tbody>
+							for _, ver := range params.Versions {
+								{{ base := ver.Updated.Format("2006-01-02") + "_r" + strconv.Itoa(ver.Revision) }}
+								<tr>
+									<td title={ "ID: " + ver.ID }>
+										{ ver.Updated.Format("January 2, 2006") }
+										if ver.Revision != 1 {
+											{ " " }(rev { ver.Revision })
+										}
+									</td>
+									<td>
+										{{ base1 := "ottrec_simplified_" + base }}
+										<a href={ "/export/" + ver.ID + ".json" } download={ base1 + "_simplified.json" }>json</a>
+										<a href={ "/export/" + ver.ID + ".csv.zip" } download={ base1 + "_simplified.csv.zip" }>csv</a>
+									</td>
+									<td>
+										{{ base2 := "ottrec_raw_" + base }}
+										<a href={ "/v1/" + ver.ID + "/proto" } download={ base2 + ".proto" }>proto</a>
+										<a href={ "/v1/" + ver.ID + "/pb" } download={ base2 + ".pb" }>pb</a>
+										<a href={ "/v1/" + ver.ID + "/textpb" } download={ base2 + ".textpb" }>textpb</a>
+										<a href={ "/v1/" + ver.ID + "/json" } download={ base2 + ".json" }>json</a>
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+					<p>
+						Showing the last { len(params.Versions) } versions. Use the API to access older data.
+					</p>
+				</section>
+			}
+			<section id="license">
+				<h1>License</h1>
+				<p>
+					This data has been scraped and redistributed with permission from the City of Ottawa, and can be used freely as long as the attribution text in the provided files is displayed where the data is used.
+				</p>
+			</section>
+			<footer>
+				<div class="copyright">Copyright 2025 Patrick Gaskin</div>
+				<nav>
+					<a href="https://github.com/pgaskin/ottrec">GitHub</a>
+				</nav>
+			</footer>
+		</body>
+	</html>
+}
+
+// you generally want to use the simplified data (as it's easier to use and has a relatively stable structure) unless you need historical data, you need access to lower-level scraped fields, or you need more control over how the data is processed

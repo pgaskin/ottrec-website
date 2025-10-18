@@ -2,7 +2,6 @@
 package static
 
 import (
-	"bytes"
 	"crypto/sha1"
 	"embed"
 	"encoding/base32"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pgaskin/ottrec-website/internal/httpfile"
+	"github.com/pgaskin/ottrec-website/internal/postcss"
 )
 
 // TODO: refactor, compress assets in the background, support renaming assets per group
@@ -105,9 +105,13 @@ func newFile(name string) *file {
 		if !strings.Contains(name, "/") {
 			switch ext {
 			case ".css":
-				buf = regexp.MustCompile(`url\([^)]+\)`).ReplaceAllFunc(buf, func(b []byte) []byte {
-					return []byte("url(" + getFile(string(b[bytes.IndexByte(b, '(')+1:len(b)-1])).HashName + ")")
-				})
+				css, err := postcss.Transform(string(buf), "defaults, safari > 15, chrome > 110, firefox > 110")
+				if err != nil {
+					return nil, fmt.Errorf("compile css: %w", err)
+				}
+				buf = []byte(regexp.MustCompile(`url\([^)]+\)`).ReplaceAllStringFunc(css, func(css string) string {
+					return "url(" + getFile(string(css[strings.IndexByte(css, '(')+1:len(css)-1])).HashName + ")"
+				}))
 			}
 		}
 

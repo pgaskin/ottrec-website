@@ -2,10 +2,14 @@ module github.com/pgaskin/ottrec-website
 
 go 1.25.0
 
-tool github.com/a-h/templ/cmd/templ
+tool (
+	github.com/a-h/templ/cmd/templ
+	github.com/evanw/esbuild/cmd/esbuild
+)
 
 require (
 	github.com/a-h/templ v0.3.943
+	github.com/fastschema/qjs v0.0.4
 	github.com/kelindar/bitmap v1.5.3
 	github.com/klauspost/compress v1.18.0
 	github.com/lmittmann/tint v1.1.2
@@ -23,6 +27,8 @@ require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cli/browser v1.3.0 // indirect
+	github.com/dlclark/regexp2 v1.11.4 // indirect
+	github.com/evanw/esbuild v0.25.11 // indirect
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/kelindar/simd v1.1.2 // indirect
