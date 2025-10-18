@@ -343,6 +343,11 @@ func (db *Cache) Import(ctx context.Context, logger *slog.Logger, repo, rev stri
 		return err
 	}
 
+	// do a best-effort wal checkpoint
+	if err := sqliteCheckpointWAL(db.db, sqlite3.CHECKPOINT_PASSIVE); err != nil {
+		return err
+	}
+
 	slog.Info("cache: import finished")
 	return nil
 }
@@ -512,6 +517,24 @@ func sqliteResetDatabase(db *sql.DB) error {
 			return err
 		}
 		return nil
+	})
+}
+
+// sqliteCheckpointWAL triggers a WAL checkpoint.
+func sqliteCheckpointWAL(db *sql.DB, mode sqlite3.CheckpointMode) error {
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	return conn.Raw(func(driverConn any) error {
+		conn, ok := driverConn.(driver.Conn)
+		if !ok {
+			return errors.New("not a sqlite3 database")
+		}
+		_, _, err := conn.Raw().WALCheckpoint("main", mode)
+		return err
 	})
 }
 
