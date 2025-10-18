@@ -47,7 +47,7 @@ func Data(cfg DataConfig) (http.Handler, error) {
 
 	// TODO: visual low-level historical diff? maybe this should be a separate service?
 
-	mux.Handle("/", &dataHomeHandler{
+	mux.Handle("/{$}", &dataHomeHandler{
 		Host:                  cfg.Host,
 		Cache:                 cfg.Cache,
 		MaxHistoricalVersions: 50,
