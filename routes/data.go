@@ -279,7 +279,7 @@ func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, sp
 	// better caching) as long as it isn't a latest/latest-relative request (so
 	// refreshing will still get the latest one for that).
 	if !strings.HasPrefix(spec, "latest") && spec != id {
-		h.redirectFile(w, id, ".csv.zip")
+		h.redirectFile(w, id, ".json")
 		return
 	}
 
