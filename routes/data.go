@@ -77,6 +77,7 @@ type dataHomeHandler struct {
 
 func (h *dataHomeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Vary", "Accept-Encoding")
+	w.Header().Set("Cache-Control", "public, no-cache")
 
 	if r.URL.RawQuery != "" {
 		w.Header().Set("Cache-Control", "no-store")
@@ -208,7 +209,7 @@ func (h *dataExportHandler) serveSchemaCSV(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spec string) {
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "public, no-cache")
 
 	buf, id, err := h.resolveCSV(r.Context(), spec)
 	if err != nil {
@@ -231,7 +232,7 @@ func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spe
 }
 
 func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, spec string) {
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "public, no-cache")
 
 	buf, id, err := h.resolveJSON(r.Context(), spec)
 	if err != nil {

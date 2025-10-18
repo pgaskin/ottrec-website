@@ -73,6 +73,7 @@ type websiteHomeHandler struct {
 
 func (h *websiteHomeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Vary", "Accept-Encoding")
+	w.Header().Set("Cache-Control", "public, no-cache")
 
 	if r.URL.RawQuery != "" {
 		w.Header().Set("Cache-Control", "no-store")
