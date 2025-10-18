@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -159,6 +160,12 @@ func (h *dataExportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.RawQuery != "" {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, r.URL.EscapedPath(), http.StatusTemporaryRedirect)
+		return
+	}
+
 	if rest, ok := strings.CutPrefix(r.URL.Path, h.Base); ok {
 		if rest == "schema.json" {
 			h.serveSchemaJSON(w, r)
@@ -179,6 +186,16 @@ func (h *dataExportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.serveError(w, "not found", http.StatusNotFound)
+}
+
+func (h *dataExportHandler) redirectFile(w http.ResponseWriter, spec, ext string) {
+	var u strings.Builder
+	u.WriteString(h.Base)
+	u.WriteString(spec)
+	u.WriteString(url.PathEscape(ext))
+	w.Header().Set("Location", u.String())
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
 func (h *dataExportHandler) serveError(w http.ResponseWriter, message string, code int) {
@@ -209,11 +226,15 @@ func (h *dataExportHandler) serveSchemaCSV(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spec string) {
-	w.Header().Set("Cache-Control", "public, no-cache")
+	w.Header().Set("Cache-Control", "public, max-age=60")
 
 	buf, id, err := h.resolveCSV(r.Context(), spec)
 	if err != nil {
-		h.serveError(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		if errors.Is(err, errInvalidSpecFormat) {
+			h.serveError(w, "invalid spec format "+strconv.Quote(spec), http.StatusBadRequest)
+		} else {
+			h.serveError(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 	if buf == nil {
@@ -221,28 +242,50 @@ func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spe
 		return
 	}
 
+	// if it isn't the canonical URL, redirect it to the canonical one (for
+	// better caching) as long as it isn't a latest/latest-relative request (so
+	// refreshing will still get the latest one for that).
+	if !strings.HasPrefix(spec, "latest") && spec != id {
+		h.redirectFile(w, id, ".csv.zip")
+		return
+	}
+
+	w.Header().Set("Cache-Control", "public, no-cache")
+
 	// compute the etag from the server hash and data hash
 	tag := sha1.Sum([]byte(exehash + id))
 	w.Header().Set("ETag", `W/"`+base32.StdEncoding.EncodeToString(tag[:])+`"`) // weak since zip compression may not be deterministic
-
-	// TODO: etag (binary hash and data id)
 
 	w.Header().Set("Content-Type", "application/zip")
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(buf))
 }
 
 func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, spec string) {
-	w.Header().Set("Cache-Control", "public, no-cache")
+	w.Header().Set("Cache-Control", "public, max-age=60")
 
 	buf, id, err := h.resolveJSON(r.Context(), spec)
 	if err != nil {
-		h.serveError(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		if errors.Is(err, errInvalidSpecFormat) {
+			h.serveError(w, "invalid spec format "+strconv.Quote(spec), http.StatusBadRequest)
+		} else {
+			h.serveError(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 	if buf == nil {
 		h.serveError(w, "no data found for "+strconv.Quote(spec), http.StatusNotFound)
 		return
 	}
+
+	// if it isn't the canonical URL, redirect it to the canonical one (for
+	// better caching) as long as it isn't a latest/latest-relative request (so
+	// refreshing will still get the latest one for that).
+	if !strings.HasPrefix(spec, "latest") && spec != id {
+		h.redirectFile(w, id, ".csv.zip")
+		return
+	}
+
+	w.Header().Set("Cache-Control", "public, no-cache")
 
 	// TODO: negotiate and cache compression
 
@@ -253,6 +296,8 @@ func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, sp
 	w.Header().Set("Content-Type", "application/json")
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(buf))
 }
+
+var errInvalidSpecFormat = errors.New("invalid spec format")
 
 func (h *dataExportHandler) resolve(spec string) (*dataExportData, error) {
 	if spec == "" {
@@ -275,7 +320,7 @@ func (h *dataExportHandler) resolve(spec string) (*dataExportData, error) {
 		return nil, fmt.Errorf("resolve %q: %w", spec, err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("invalid spec format %q", spec)
+		return nil, errInvalidSpecFormat
 	}
 	if id == "" {
 		return nil, nil
