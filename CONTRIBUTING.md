@@ -13,12 +13,14 @@ cd ottrec
 git clone https://github.com/pgaskin/ottrec ottrec
 git clone https://github.com/pgaskin/ottrec-website website
 git clone https://github.com/pgaskin/ottrec-data data --filter=blob:none
+git clone https://github.com/pgaskin/ottrec-misc misc
 git -C data worktree add ../cache cache
 
 # set up the go workspace
 go work init
 go work use ./ottrec
 go work use ./website
+go work use ./misc
 
 # optional: define some useful aliases
 alias ottrec-root='dirname "$(go env GOWORK)"'
