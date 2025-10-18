@@ -21,11 +21,13 @@ import (
 const (
 	PostCSSVersion          = "8.5.6"
 	PostCSSPresetEnvVersion = "10.4.0"
+	PostCSSMinifyVersion    = "1.2.0"
 )
 
 const Source = `
 	export { default as postcss } from 'https://esm.sh/postcss@` + PostCSSVersion + `?dev&target=es2015'
 	export { default as postcssPresetEnv } from 'https://esm.sh/postcss-preset-env@` + PostCSSPresetEnvVersion + `?dev&target=es2015&deps=postcss@` + PostCSSVersion + `'
+	export { default as postcssMinify } from 'https://esm.sh/postcss-minify@` + PostCSSMinifyVersion + `?dev&target=es2015'
 `
 
 func main() {

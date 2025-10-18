@@ -22,13 +22,14 @@ import (
 var bundleJS []byte
 
 var wrapperJS = `
-	const { postcss, postcssPresetEnv } = bundle
+	const { postcss, postcssPresetEnv, postcssMinify } = bundle
 
 	async function transform(css, browsers) {
 		const proc = postcss([
 			postcssPresetEnv({
 				browsers: [browsers],
 			}),
+			postcssMinify(),
 		])
 		const res = await proc.process(css)
 		return res.css
