@@ -56,7 +56,7 @@ func TestJSON(t *testing.T) {
 					t.Errorf("incorrect output or outdated test (sha: %s)", sha)
 				}
 			case DummyData:
-				if sha := sha1sum(buf); sha != "f7ff14f76d74152eb975a35faffc62d364839a80" {
+				if sha := sha1sum(buf); sha != "a7d82d4b82eec3de7f62d4b4661eaf94dd8b291b" {
 					logJSON(t, false, buf)
 					t.Errorf("incorrect output or outdated test (sha: %s)", sha)
 				}
