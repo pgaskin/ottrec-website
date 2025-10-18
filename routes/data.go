@@ -135,11 +135,13 @@ type dataExportData struct {
 	id    string
 	ready <-chan struct{}
 
-	err     error
-	csv     []byte
-	csvErr  error
-	json    []byte
-	jsonErr error
+	err      error
+	csv      []byte
+	csvETag  string
+	csvErr   error
+	json     []byte
+	jsonETag string
+	jsonErr  error
 }
 
 // lazy since not everything needs it, and to give a chance to set stuff like
@@ -228,7 +230,7 @@ func (h *dataExportHandler) serveSchemaCSV(w http.ResponseWriter, r *http.Reques
 func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spec string) {
 	w.Header().Set("Cache-Control", "public, max-age=60")
 
-	buf, id, err := h.resolveCSV(r.Context(), spec)
+	buf, etag, id, err := h.resolveCSV(r.Context(), spec)
 	if err != nil {
 		if errors.Is(err, errInvalidSpecFormat) {
 			h.serveError(w, "invalid spec format "+strconv.Quote(spec), http.StatusBadRequest)
@@ -251,11 +253,7 @@ func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spe
 	}
 
 	w.Header().Set("Cache-Control", "public, no-cache")
-
-	// compute the etag from the server hash and data hash
-	tag := sha1.Sum([]byte(exehash + id))
-	w.Header().Set("ETag", `W/"`+base32.StdEncoding.EncodeToString(tag[:])+`"`) // weak since zip compression may not be deterministic
-
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", "application/zip")
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(buf))
 }
@@ -263,7 +261,7 @@ func (h *dataExportHandler) serveCSV(w http.ResponseWriter, r *http.Request, spe
 func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, spec string) {
 	w.Header().Set("Cache-Control", "public, max-age=60")
 
-	buf, id, err := h.resolveJSON(r.Context(), spec)
+	buf, etag, id, err := h.resolveJSON(r.Context(), spec)
 	if err != nil {
 		if errors.Is(err, errInvalidSpecFormat) {
 			h.serveError(w, "invalid spec format "+strconv.Quote(spec), http.StatusBadRequest)
@@ -289,10 +287,7 @@ func (h *dataExportHandler) serveJSON(w http.ResponseWriter, r *http.Request, sp
 
 	// TODO: negotiate and cache compression
 
-	// compute the etag from the server hash and data hash
-	tag := sha1.Sum([]byte(exehash + id))
-	w.Header().Set("ETag", `"`+base32.StdEncoding.EncodeToString(tag[:])+`"`)
-
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", "application/json")
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(buf))
 }
@@ -439,10 +434,17 @@ func (h *dataExportHandler) prepare(id string, cachedOnly bool) *dataExportData 
 			buf := templ.GetBuffer()
 			defer templ.ReleaseBuffer(buf)
 
+			// note: we could have used the exehash and data hash as the etag to
+			// be able to check it before actually doing the export, but export
+			// is cheap, and this is simple enough (and still saves bandwidth,
+			// which is the point)
+
 			if err := exportCSV(buf, exp); err != nil {
 				d.csvErr = err
 			} else {
+				sum := sha1.Sum(buf.Bytes())
 				d.csv = slices.Clone(buf.Bytes())
+				d.csvETag = `W/"` + base32.StdEncoding.EncodeToString(sum[:]) + `"`
 			}
 			d.csvErr = exportCSV(buf, exp)
 
@@ -451,7 +453,9 @@ func (h *dataExportHandler) prepare(id string, cachedOnly bool) *dataExportData 
 			if err := ottrecexp.WriteJSON(exp, buf); err != nil {
 				d.jsonErr = err
 			} else {
+				sum := sha1.Sum(buf.Bytes())
 				d.json = slices.Clone(buf.Bytes())
+				d.jsonETag = `W/"` + base32.StdEncoding.EncodeToString(sum[:]) + `"`
 			}
 			buf.Reset()
 
@@ -462,41 +466,41 @@ func (h *dataExportHandler) prepare(id string, cachedOnly bool) *dataExportData 
 	return d
 }
 
-func (h *dataExportHandler) resolveCSV(ctx context.Context, spec string) ([]byte, string, error) {
+func (h *dataExportHandler) resolveCSV(ctx context.Context, spec string) ([]byte, string, string, error) {
 	d, err := h.resolve(spec)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	if d == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	select {
 	case <-ctx.Done():
-		return nil, d.id, ctx.Err()
+		return nil, "", d.id, ctx.Err()
 	case <-d.ready:
 		if d.err != nil {
-			return nil, d.id, err
+			return nil, "", d.id, err
 		}
-		return d.csv, d.id, d.csvErr
+		return d.csv, d.csvETag, d.id, d.csvErr
 	}
 }
 
-func (h *dataExportHandler) resolveJSON(ctx context.Context, spec string) ([]byte, string, error) {
+func (h *dataExportHandler) resolveJSON(ctx context.Context, spec string) ([]byte, string, string, error) {
 	d, err := h.resolve(spec)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	if d == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	select {
 	case <-ctx.Done():
-		return nil, d.id, ctx.Err()
+		return nil, "", d.id, ctx.Err()
 	case <-d.ready:
 		if d.err != nil {
-			return nil, d.id, err
+			return nil, "", d.id, err
 		}
-		return d.json, d.id, d.jsonErr
+		return d.json, d.jsonETag, d.id, d.jsonErr
 	}
 }
 
