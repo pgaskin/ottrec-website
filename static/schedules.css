@@ -385,6 +385,22 @@
 	}
 }
 
+/* override default schedule styling for readability (since it's the main content rather than a pop-up) */
+article.facility {
+	section.note-box {
+		&.note-warn {
+			background: light-dark(#fcf4dd, #16130b); /* yellow-50, yellow-950, but fainter */
+			border-color: light-dark(#dad1b5, #2d250b); /* yellow-150, yellow-900, but fainter */
+		}
+	}
+	table.schedule {
+		font-size: .8rem;
+		tbody td {
+			font-size: .9rem;
+		}
+	}
+}
+
 /* print: drop the navigation and search, print the schedules full width */
 @media print {
 	.schedules-toc,
