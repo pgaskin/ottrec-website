@@ -49,16 +49,27 @@ func Exec(ctx context.Context, repo string, output func(iter.Seq[string]), arg .
 			return err
 		}
 		defer r.Close()
-		defer w.Close()
 
 		cmd.Stdout = w
 		cmd.Stderr = w
 
+		var (
+			done   = make(chan struct{})
+			outErr error
+		)
 		go func() {
-			var err error
-			output(readLinesSeq(r)(&err))
-			_ = err
+			defer close(done)
+			output(readLinesSeq(r)(&outErr))
+			io.Copy(io.Discard, r) // don't block the command if output stopped early
 		}()
+
+		err = cmd.Run()
+		w.Close() // so the reader sees EOF
+		<-done    // and has drained everything before r is closed
+		if err != nil {
+			return err
+		}
+		return outErr
 	}
 	return cmd.Run()
 }
