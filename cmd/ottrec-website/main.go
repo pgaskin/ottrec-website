@@ -24,17 +24,21 @@ import (
 )
 
 var (
-	EnvPrefix    = "OTTREC_WEBSITE_"
-	Addr         = pflag.StringP("addr", "a", ":8083", "listen address")
-	Data         = pflag.StringP("data", "d", "http://localhost:8082/v1/latest/pb", "url or path to data protobuf")
-	DataInterval = pflag.DurationP("data-interval", "i", time.Minute*15, "poll interval for data")
-	NoEnrich     = pflag.Bool("no-enrich", false, "don't derive schedule-change enrichment from the data for the today page")
-	HeadHTML     = pflag.String("head-html", "", "raw html to inject at the bottom of <head> on every page")
-	AboutHTML    = pflag.String("about-html", "", "raw html to inject in the about page")
-	HomeHTML     = pflag.String("home-html", "", "raw html to inject at the bottom of the homepage main content")
-	LogLevel     = pflagx.LevelP("log-level", "L", slog.LevelInfo, "log level")
-	LogJSON      = pflag.Bool("log-json", false, "use json logs")
-	Help         = pflag.BoolP("help", "h", false, "show this help text")
+	EnvPrefix           = "OTTREC_WEBSITE_"
+	Addr                = pflag.StringP("addr", "a", ":8083", "listen address")
+	Data                = pflag.StringP("data", "d", "http://localhost:8082/v1/latest/pb", "url or path to data protobuf")
+	DataInterval        = pflag.DurationP("data-interval", "i", time.Minute*15, "poll interval for data")
+	NoEnrich            = pflag.Bool("no-enrich", false, "don't derive schedule-change enrichment from the data for the today page")
+	HeadHTML            = pflag.String("head-html", "", "raw html to inject at the bottom of <head> on every page")
+	AboutHTML           = pflag.String("about-html", "", "raw html to inject in the about page")
+	HomeHTML            = pflag.String("home-html", "", "raw html to inject at the bottom of the homepage main content")
+	MapTilesLight       = pflag.String("map-tiles-light", "", "leaflet url template for the light basemap tiles (default: carto voyager)")
+	MapTilesDark        = pflag.String("map-tiles-dark", "", "leaflet url template for the dark basemap tiles (default: carto dark_all)")
+	MapTilesAttribution = pflag.String("map-tiles-attribution", "", "raw html crediting the basemap tile source (default: openstreetmap + carto)")
+	MapTilesSubdomains  = pflag.String("map-tiles-subdomains", "", "{s} substitutions for the basemap tile url templates (default: abcd)")
+	LogLevel            = pflagx.LevelP("log-level", "L", slog.LevelInfo, "log level")
+	LogJSON             = pflag.Bool("log-json", false, "use json logs")
+	Help                = pflag.BoolP("help", "h", false, "show this help text")
 )
 
 // TODO: http logs, request id
@@ -148,11 +152,15 @@ func run() error {
 	}()
 
 	handler, err := routes.Website(routes.WebsiteConfig{
-		Data:      getData,
-		Enrich:    getEnrich,
-		HeadHTML:  *HeadHTML,
-		AboutHTML: *AboutHTML,
-		HomeHTML:  *HomeHTML,
+		Data:                getData,
+		Enrich:              getEnrich,
+		HeadHTML:            *HeadHTML,
+		AboutHTML:           *AboutHTML,
+		HomeHTML:            *HomeHTML,
+		MapTilesLight:       *MapTilesLight,
+		MapTilesDark:        *MapTilesDark,
+		MapTilesAttribution: *MapTilesAttribution,
+		MapTilesSubdomains:  *MapTilesSubdomains,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize routes: %w", err)

@@ -155,6 +155,12 @@ templ websiteHomeExtra() {
 	}
 }
 
+// websiteMapTiles emits the basemap tile configuration as a JSON island, read
+// by static/tiles.ts. It must precede any map script.
+templ websiteMapTiles() {
+	@templ.JSONScript("map-tiles", mapTiles)
+}
+
 // websiteThemeHead applies the color scheme override saved by the navbar
 // toggle. The inline script (the compiled theme-apply.ts, shared with the
 // navbar toggle in theme.ts) must run before first paint to avoid flashing the

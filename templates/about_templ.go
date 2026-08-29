@@ -123,7 +123,7 @@ func WebsiteAboutPage(params WebsiteParams) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "Map data © <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors<br>Map tiles © <a href=\"https://carto.com/attributions\">CARTO</a><br>Website © <a href=\"https://github.com/pgaskin\">Patrick Gaskin</a></p></section></main>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "Map tiles @templ.Raw(mapTiles.Attribution)<br>Website © <a href=\"https://github.com/pgaskin\">Patrick Gaskin</a></p></section></main>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -138,7 +138,7 @@ func WebsiteAboutPage(params WebsiteParams) templ.Component {
 			var templ_7745c5c3_Var7 string
 			templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.ResolveAttributeValue(static.Path(static.StarredJS))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `about.templ`, Line: 104, Col: 45}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `about.templ`, Line: 102, Col: 45}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var7)
 			if templ_7745c5c3_Err != nil {

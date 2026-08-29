@@ -27,6 +27,7 @@ templ regionsMapBody(data ottrecidx.DataRef) {
 // reads it, at the end of <body>.
 templ regionsMapFoot(data ottrecidx.DataRef) {
 	@templ.JSONScript("regions-data", buildRegionsData(data))
+	@websiteMapTiles()
 	<script src={ static.Path(static.RegionsJS) }></script>
 }
 

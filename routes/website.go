@@ -33,6 +33,14 @@ type WebsiteConfig struct {
 	AboutHTML string
 	// HomeHTML is raw HTML injected at the bottom of the homepage's <main>.
 	HomeHTML string
+	// MapTilesLight and MapTilesDark are the leaflet basemap tile url
+	// templates used by the maps in each color scheme.
+	MapTilesLight string
+	MapTilesDark  string
+	// MapTilesAttribution is the raw HTML crediting the tile source, and
+	// MapTilesSubdomains the {s} substitutions for the url templates.
+	MapTilesAttribution string
+	MapTilesSubdomains  string
 }
 
 func Website(cfg WebsiteConfig) (http.Handler, error) {
@@ -42,6 +50,7 @@ func Website(cfg WebsiteConfig) (http.Handler, error) {
 	templates.SetHeadExtra(cfg.HeadHTML)
 	templates.SetAboutExtra(cfg.AboutHTML)
 	templates.SetHomeExtra(cfg.HomeHTML)
+	templates.SetMapTiles(cfg.MapTilesLight, cfg.MapTilesDark, cfg.MapTilesAttribution, cfg.MapTilesSubdomains)
 
 	base := websiteHandlerBase{
 		Data:   cfg.Data,

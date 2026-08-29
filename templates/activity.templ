@@ -295,6 +295,7 @@ templ WebsiteActivityPage(params WebsiteActivityParams) {
 		<script src={ static.Path(static.StarredJS) }></script>
 		<script src={ static.Path(static.ActivityTodayJS) }></script>
 		if len(mapFacs) > 0 {
+			@websiteMapTiles()
 			<script src={ static.Path(static.ActivityMapJS) }></script>
 		}
 		<script src={ static.Path(static.FacilityModalJS) }></script>

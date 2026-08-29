@@ -1,5 +1,6 @@
 'use strict'
 import * as L from 'leaflet'
+import {tileAttribution, tileSubdomains, tileURL} from './tiles'
 
 // the JSON island embedded by the page (see templates/regions.go)
 interface RegionsData {
@@ -41,11 +42,10 @@ const effectiveDark = () => {
 	if (cs === 'light') return false
 	return darkQuery.matches
 }
-const tileURL = (dark: boolean) => 'https://{s}.basemaps.cartocdn.com/' + (dark ? 'dark_all' : 'rastertiles/voyager') + '/{z}/{x}/{y}{r}.png'
 const tiles = L.tileLayer(tileURL(effectiveDark()), {
-	subdomains: 'abcd',
+	subdomains: tileSubdomains,
 	maxZoom: 20,
-	attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a> &copy; <a href="https://github.com/pgaskin">Patrick Gaskin</a>',
+	attribution: tileAttribution + ' &copy; <a href="https://github.com/pgaskin">Patrick Gaskin</a>',
 }).addTo(map)
 darkQuery.addEventListener('change', () => tiles.setUrl(tileURL(effectiveDark())))
 window.addEventListener('themechange', () => tiles.setUrl(tileURL(effectiveDark())))

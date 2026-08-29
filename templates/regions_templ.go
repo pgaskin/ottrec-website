@@ -71,6 +71,10 @@ func regionsMapFoot(data ottrecidx.DataRef) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
+		templ_7745c5c3_Err = websiteMapTiles().Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
 		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<script src=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
@@ -78,7 +82,7 @@ func regionsMapFoot(data ottrecidx.DataRef) templ.Component {
 		var templ_7745c5c3_Var3 string
 		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(static.Path(static.RegionsJS))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 30, Col: 44}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 31, Col: 44}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
 		if templ_7745c5c3_Err != nil {
@@ -128,7 +132,7 @@ func regionsWeightBody(data ottrecidx.DataRef) templ.Component {
 			var templ_7745c5c3_Var5 string
 			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(row.Region)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 48, Col: 21}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 49, Col: 21}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 			if templ_7745c5c3_Err != nil {
@@ -141,7 +145,7 @@ func regionsWeightBody(data ottrecidx.DataRef) templ.Component {
 			var templ_7745c5c3_Var6 string
 			templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(row.Weight)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 49, Col: 33}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 50, Col: 33}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 			if templ_7745c5c3_Err != nil {
@@ -159,7 +163,7 @@ func regionsWeightBody(data ottrecidx.DataRef) templ.Component {
 				var templ_7745c5c3_Var7 string
 				templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(f.Name)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 53, Col: 22}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 54, Col: 22}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 				if templ_7745c5c3_Err != nil {
@@ -172,7 +176,7 @@ func regionsWeightBody(data ottrecidx.DataRef) templ.Component {
 				var templ_7745c5c3_Var8 string
 				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(f.To)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 53, Col: 35}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 54, Col: 35}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 				if templ_7745c5c3_Err != nil {
@@ -185,7 +189,7 @@ func regionsWeightBody(data ottrecidx.DataRef) templ.Component {
 				var templ_7745c5c3_Var9 string
 				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(f.Margin)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 54, Col: 53}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 55, Col: 53}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 				if templ_7745c5c3_Err != nil {
@@ -244,7 +248,7 @@ func regionsTableBody(data ottrecidx.DataRef) templ.Component {
 			var templ_7745c5c3_Var11 string
 			templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(row.Name)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 79, Col: 19}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 80, Col: 19}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 			if templ_7745c5c3_Err != nil {
@@ -257,7 +261,7 @@ func regionsTableBody(data ottrecidx.DataRef) templ.Component {
 			var templ_7745c5c3_Var12 string
 			templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(row.Class)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 80, Col: 20}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 81, Col: 20}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 			if templ_7745c5c3_Err != nil {
@@ -270,7 +274,7 @@ func regionsTableBody(data ottrecidx.DataRef) templ.Component {
 			var templ_7745c5c3_Var13 string
 			templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(row.Lat)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 81, Col: 30}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 82, Col: 30}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 			if templ_7745c5c3_Err != nil {
@@ -283,7 +287,7 @@ func regionsTableBody(data ottrecidx.DataRef) templ.Component {
 			var templ_7745c5c3_Var14 string
 			templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(row.Lng)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 82, Col: 30}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `regions.templ`, Line: 83, Col: 30}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 			if templ_7745c5c3_Err != nil {

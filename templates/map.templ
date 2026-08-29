@@ -84,6 +84,7 @@ templ WebsiteMapPage(params WebsiteParams) {
 		</div>
 		@templ.JSONScript("map-data", buildMapData(params.Data))
 		<script src={ static.Path(static.StarredJS) }></script>
+		@websiteMapTiles()
 		<script src={ static.Path(static.MapJS) }></script>
 		<script src={ static.Path(static.FacilityModalJS) }></script>
 	}

@@ -92,9 +92,7 @@ templ WebsiteAboutPage(params WebsiteParams) {
 						{ line }
 						<br/>
 					}
-					Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
-					<br/>
-					Map tiles © <a href="https://carto.com/attributions">CARTO</a>
+					Map tiles @templ.Raw(mapTiles.Attribution)
 					<br/>
 					Website © <a href="https://github.com/pgaskin">Patrick Gaskin</a>
 				</p>

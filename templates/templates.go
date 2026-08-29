@@ -226,6 +226,46 @@ func SetHomeExtra(html string) {
 	httpx.AddExeExtra(html)
 }
 
+// mapTiles is the basemap tile configuration shared by the map scripts (as a
+// JSON island) and the about page's attribution, so both credit the same
+// source. [SetMapTiles] overrides the defaults.
+var mapTiles = mapTilesJSON{
+	Light:       "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+	Dark:        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+	Attribution: `&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>`,
+	Subdomains:  "abcd",
+}
+
+type mapTilesJSON struct {
+	Light       string `json:"light"`
+	Dark        string `json:"dark"`
+	Attribution string `json:"attribution"`
+	Subdomains  string `json:"subdomains"`
+}
+
+// SetMapTiles overrides the basemap tiles used by the Leaflet maps: the
+// light/dark url templates, the tile source attribution (html, not including
+// the site's own credit), and the {s} substitutions. An empty value keeps the
+// default for that field. It must be called at most once, before anything is
+// rendered. The values are mixed into the etags so cached pages revalidate when
+// they change.
+func SetMapTiles(light, dark, attribution, subdomains string) {
+	if light == "" && dark == "" && attribution == "" && subdomains == "" {
+		return
+	}
+	for dst, val := range map[*string]string{
+		&mapTiles.Light:       light,
+		&mapTiles.Dark:        dark,
+		&mapTiles.Attribution: attribution,
+		&mapTiles.Subdomains:  subdomains,
+	} {
+		if val != "" {
+			*dst = val
+		}
+	}
+	httpx.AddExeExtra(strings.Join([]string{light, dark, attribution, subdomains}, "\x00"))
+}
+
 func cutBefore(s, sep string) string {
 	before, _, _ := strings.Cut(s, sep)
 	return before

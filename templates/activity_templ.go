@@ -1229,14 +1229,18 @@ func WebsiteActivityPage(params WebsiteActivityParams) templ.Component {
 				return templ_7745c5c3_Err
 			}
 			if len(mapFacs) > 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 123, "<script src=\"")
+				templ_7745c5c3_Err = websiteMapTiles().Render(ctx, templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 123, " <script src=\"")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var70 string
 				templ_7745c5c3_Var70, templ_7745c5c3_Err = templ.ResolveAttributeValue(static.Path(static.ActivityMapJS))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 298, Col: 50}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 299, Col: 50}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var70)
 				if templ_7745c5c3_Err != nil {
@@ -1254,7 +1258,7 @@ func WebsiteActivityPage(params WebsiteActivityParams) templ.Component {
 			var templ_7745c5c3_Var71 string
 			templ_7745c5c3_Var71, templ_7745c5c3_Err = templ.ResolveAttributeValue(static.Path(static.FacilityModalJS))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 300, Col: 51}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 301, Col: 51}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var71)
 			if templ_7745c5c3_Err != nil {
@@ -1344,7 +1348,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 		var templ_7745c5c3_Var75 string
 		templ_7745c5c3_Var75, templ_7745c5c3_Err = templ.ResolveAttributeValue(it.Slug)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 316, Col: 99}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 317, Col: 99}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var75)
 		if templ_7745c5c3_Err != nil {
@@ -1357,7 +1361,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 		var templ_7745c5c3_Var76 string
 		templ_7745c5c3_Var76, templ_7745c5c3_Err = templ.ResolveAttributeValue(it.GroupKey)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 316, Col: 126}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 317, Col: 126}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var76)
 		if templ_7745c5c3_Err != nil {
@@ -1393,7 +1397,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 			var templ_7745c5c3_Var79 string
 			templ_7745c5c3_Var79, templ_7745c5c3_Err = templ.JoinStringErrs(d)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 319, Col: 106}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 320, Col: 106}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var79))
 			if templ_7745c5c3_Err != nil {
@@ -1411,7 +1415,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 		var templ_7745c5c3_Var80 templ.SafeURL
 		templ_7745c5c3_Var80, templ_7745c5c3_Err = templ.JoinURLErrs(templ.URL("/schedules/facility/" + it.Slug))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 322, Col: 118}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 323, Col: 118}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var80))
 		if templ_7745c5c3_Err != nil {
@@ -1424,7 +1428,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 		var templ_7745c5c3_Var81 string
 		templ_7745c5c3_Var81, templ_7745c5c3_Err = templ.ResolveAttributeValue(it.Slug)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 322, Col: 150}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 323, Col: 150}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var81)
 		if templ_7745c5c3_Err != nil {
@@ -1437,7 +1441,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 		var templ_7745c5c3_Var82 string
 		templ_7745c5c3_Var82, templ_7745c5c3_Err = templ.JoinStringErrs(it.Facility)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 322, Col: 166}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 323, Col: 166}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var82))
 		if templ_7745c5c3_Err != nil {
@@ -1450,7 +1454,7 @@ func activityChangeRow(it activityChangeItem) templ.Component {
 		var templ_7745c5c3_Var83 string
 		templ_7745c5c3_Var83, templ_7745c5c3_Err = templ.JoinStringErrs(it.Text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 322, Col: 218}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `activity.templ`, Line: 323, Col: 218}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var83))
 		if templ_7745c5c3_Err != nil {

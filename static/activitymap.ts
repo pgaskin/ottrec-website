@@ -8,6 +8,7 @@
 
 import * as L from 'leaflet'
 import {pinIcon} from './pin'
+import {tileAttribution, tileSubdomains, tileURL} from './tiles'
 
 interface Fac {
 	name: string
@@ -30,9 +31,6 @@ if (el && dataEl) {
 		if (cs === 'light') return false
 		return darkQuery.matches
 	}
-	const tileURL = (dark: boolean) =>
-		'https://{s}.basemaps.cartocdn.com/' + (dark ? 'dark_all' : 'rastertiles/voyager') + '/{z}/{x}/{y}{r}.png'
-
 	const map = L.map(el, {
 		maxBounds: [[44.8, -76.6], [45.7, -75.0]],
 		maxBoundsViscosity: 1,
@@ -42,10 +40,9 @@ if (el && dataEl) {
 	}).setView([45.4215, -75.6972], 11)
 
 	const tiles = L.tileLayer(tileURL(effectiveDark()), {
-		subdomains: 'abcd',
+		subdomains: tileSubdomains,
 		maxZoom: 20,
-		attribution:
-			'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+		attribution: tileAttribution,
 	}).addTo(map)
 	darkQuery.addEventListener('change', () => tiles.setUrl(tileURL(effectiveDark())))
 	window.addEventListener('themechange', () => tiles.setUrl(tileURL(effectiveDark())))
