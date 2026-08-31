@@ -12,7 +12,7 @@ require (
 	github.com/lmittmann/tint v1.2.0
 	github.com/ncruces/go-sqlite3 v0.35.2
 	github.com/ottrec/data-enrichment v0.0.0-20260722033902-4c9ad5a731e6
-	github.com/ottrec/scraper v0.0.0-20260617053659-f8e60d2d1db7
+	github.com/ottrec/scraper v0.0.0-20260831075444-50bc8a5a388d
 	github.com/pgaskin/go-gfsubsets v0.0.1
 	github.com/pgaskin/go-hbsubset v0.0.1
 	github.com/pgaskin/go-lightningcss v0.0.0-20260725193047-fa0205d3b2f5
