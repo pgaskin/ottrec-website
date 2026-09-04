@@ -461,14 +461,20 @@ func buildTodayFeed(data ottrecidx.DataRef, enrich enrichidx.Ref, slug func(stri
 							s.EnrichedSeeSchedule = seeSchedDay[i]
 							if enOK {
 								m := enGrp.Session(rawLabel, day, s.Start, s.End)
-								s.EnrichedCancelled = m.Cancelled
-								if !m.Cancelled {
-									// group/facility-wide cancellations ("All
-									// drop-in skating, cancelled"): the scope
-									// phrase was matched against the group,
-									// not each activity, so these get the
-									// softer likely-cancelled warning, not
-									// the strike
+								s.EnrichedCancelled = m.Cancelled ||
+									// a whole-scope notice that says a
+									// cancellation happened ("The facility is
+									// closed and all programs cancelled.")
+									// takes the sessions under it with it: the
+									// scope is still an inference but the
+									// cancellation is the city's own word
+									enFac.ScopeCancelledStated(day, s.Start, s.End) ||
+									enGrp.ScopeCancelledStated(day, s.Start, s.End)
+								if !s.EnrichedCancelled {
+									// the rest of the whole-scope tier is a
+									// closure the scope only implies, which
+									// gets the softer likely-cancelled warning
+									// rather than the strike
 									s.EnrichedScopeCancelled = enFac.ScopeCancelled(day, s.Start, s.End) ||
 										enGrp.ScopeCancelled(day, s.Start, s.End)
 									s.EnrichedTimeChanged = m.TimeChange
