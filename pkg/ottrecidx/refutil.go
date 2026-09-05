@@ -153,7 +153,14 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 	// get the parsed date range
 	r, ok := ref.GetDateRange()
 	if !ok {
-		return schema.DateRange{From: -1, To: -1}, false
+		// some holiday and short-term schedules don't have a date in the
+		// caption... if all columns are single dates (potentially with gaps),
+		// it implies a date range (this isn't criticial, but it makes
+		// filtering work better)
+		r, ok = ref.impliedSingleDateRange()
+		if !ok {
+			return schema.DateRange{From: -1, To: -1}, false
+		}
 	}
 
 	var hadExplicitFromOrToYear bool
@@ -295,6 +302,37 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 			}
 		}
 	}
+
+	// if the year was assumed from the schedule date (especially if the range
+	// was assumed by [ScheduleRef.impliedSingleDateRange]), it might be one too
+	// high if the range spans a year (e.g., Dec 29 to Jan 4) once into the next
+	// one, so subtract a year from both sides if doing so would make the range
+	// cover the schedule date
+	if !hadExplicitFromOrToYear && !er.From.IsZero() && !er.To.IsZero() {
+		if scheduleDate.Before(from) || scheduleDate.After(to) {
+			fromDec, toDec := from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
+			if !scheduleDate.Before(fromDec) && !scheduleDate.After(toDec) {
+				from, to = fromDec, toDec
+			}
+		}
+	}
+
+	// ... and so it doesn't jump forwards afterwards if the city doesn't remove
+	// it immediately, if it wouldn't cover the schedule date either way and
+	// subtracting a year would make the end date at least 6 months closer (so
+	// it doesn't accidentally apply to one in the near future assuming they
+	// remove the old schedule within 6 months and also don't post new schedules
+	// that much earlier; the longest they've axtually done that from Sep
+	// 2025-2026 is 37 days), also do that
+	if !hadExplicitFromOrToYear && !er.From.IsZero() && !er.To.IsZero() {
+		if scheduleDate.Before(from) || scheduleDate.After(to) {
+			fromDec, toDec := from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
+			if abs(scheduleDate.Sub(toDec))+6*30*24*time.Hour <= abs(scheduleDate.Sub(from)) { // approximate, as above
+				from, to = fromDec, toDec
+			}
+		}
+	}
+
 	er.From = schema.MakeDateFromGo(from)
 	er.To = schema.MakeDateFromGo(to)
 
@@ -310,6 +348,59 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 
 	// otherwise, return it
 	return er, true
+}
+
+// impliedSingleDateRange returns the date range implied by the day headers if
+// all day headers specify at least a month and day (i.e., a holiday or
+// short-term schedule).
+//
+// It uses the first/last column rather than the min/max date so ones spanning
+// years are correct (from Sep 2025-2026, the city has never not ordered the
+// table chronologically).
+//
+// If there is a gap greater than 7 days, it does not return the assumed range
+// (since it might mean the days aren't actually in chronological order or span
+// years unexpectedly).
+func (ref ScheduleRef) impliedSingleDateRange() (r schema.DateRange, ok bool) {
+	n := ref.NumDays()
+	if n == 0 {
+		return r, false
+	}
+	var prev time.Time
+	for i := range n {
+		d, ok := ref.GetDayDate(i)
+		if !ok {
+			return schema.DateRange{}, false
+		}
+		month, ok := d.Month()
+		if !ok {
+			return schema.DateRange{}, false
+		}
+		day, ok := d.Day()
+		if !ok {
+			return schema.DateRange{}, false
+		}
+
+		// check the gap (adding a year if backwards)
+		cur := time.Date(1, month, day, 0, 0, 0, 0, time.UTC)
+		if i > 0 {
+			if cur.Before(prev) {
+				cur = cur.AddDate(1, 0, 0)
+			}
+			if cur.Sub(prev) > 7*24*time.Hour {
+				return schema.DateRange{}, false
+			}
+		}
+		prev = cur
+
+		if i == 0 {
+			r.From = d
+		}
+		if i == n-1 {
+			r.To = d
+		}
+	}
+	return r, true
 }
 
 // SingleDayDate returns true and a date if the [ScheduleRef.GetDayDate] index
