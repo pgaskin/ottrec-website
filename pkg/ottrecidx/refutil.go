@@ -180,12 +180,32 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 		if !monthOK {
 			return schema.DateRange{From: -1, To: -1}, false
 		}
-		// if there's no year set, use the schedule year
+		// if there's no year set, try the to year, otherwise use the schedule year
 		if !yearOK {
-			if scheduleDate.IsZero() {
-				return schema.DateRange{From: -1, To: -1}, false // no current year
+			// if there's a to year, but no from year, use the to year,
+			// decrementing it if needed (inverse of what's done in to if no
+			// from year)
+			if toYear, ok := r.To.Year(); ok {
+				year, yearOK = toYear, true
+				if toMonth, ok := r.To.Month(); ok {
+					toDay, hasToDay := r.To.Day()
+					if !hasToDay {
+						toDay = daysInMonth(toYear, toMonth)
+					}
+					fromDay := day
+					if !dayOK {
+						fromDay = 1
+					}
+					if month > toMonth || (month == toMonth && fromDay > toDay) {
+						year--
+					}
+				}
+			} else {
+				if scheduleDate.IsZero() {
+					return schema.DateRange{From: -1, To: -1}, false // no current year
+				}
+				year, yearOK = scheduleDate.Year(), true
 			}
-			year, yearOK = scheduleDate.Year(), true
 		} else {
 			hadExplicitFromOrToYear = true
 		}
