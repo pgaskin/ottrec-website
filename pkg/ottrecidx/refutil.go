@@ -299,12 +299,12 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 	er.To = schema.MakeDateFromGo(to)
 
 	// if the range is empty, skip it
-	if from.IsZero() && to.IsZero() {
+	if er.From.IsZero() && er.To.IsZero() {
 		return schema.DateRange{From: -1, To: -1}, false
 	}
 
-	// if the range is backwards, skip it
-	if from.After(to) {
+	// if the range is backwards, skip it (but not if one side is zero)
+	if !er.From.IsZero() && !er.To.IsZero() && from.After(to) {
 		return schema.DateRange{From: -1, To: -1}, false
 	}
 
