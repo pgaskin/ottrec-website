@@ -253,6 +253,12 @@ func (dxr *Indexer) index(hash string, hashCode uint64, data *schema.Data) *Inde
 		idx.durSanityCheck, now = time.Since(now), time.Now()
 	}
 
+	for fac := range idx.Data().Facilities() {
+		if d := fac.GetSourceDate(); !d.IsZero() && d.After(idx.updated) {
+			idx.updated = d
+		}
+	}
+
 	for act := range idx.Data().Activities() {
 		required, definite := act.GuessReservationRequirement()
 		if required {
@@ -293,12 +299,6 @@ func (dxr *Indexer) index(hash string, hashCode uint64, data *schema.Data) *Inde
 		idx.cached_FacilityRef_RegionSector_s[i] = fac.Sector()
 	}
 	idx.cached_FacilityRef_RegionSector = true
-
-	for fac := range idx.Data().Facilities() {
-		if d := fac.GetSourceDate(); !d.IsZero() && d.After(idx.updated) {
-			idx.updated = d
-		}
-	}
 
 	idx.durPrecompute, now = time.Since(now), time.Now()
 
