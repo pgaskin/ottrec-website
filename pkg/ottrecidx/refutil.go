@@ -317,38 +317,15 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 		}
 	}
 
-	// ... and so it doesn't jump forwards afterwards if the city doesn't remove
-	// it immediately, if it wouldn't cover the schedule date either way and
-	// subtracting a year would make the end date at least 6 months closer (so
-	// it doesn't accidentally apply to one in the near future assuming they
-	// remove the old schedule within 6 months and also don't post new schedules
-	// that much earlier; the longest they've axtually done that from Sep
-	// 2025-2026 is 37 days), also do that
+	// ... and also, if the schedule with an assumed year is in the past/future
+	// (regardless of whether we decrement the year), keep it in the past for a
+	// number of days after it would have ended if in the past so it doesn't
+	// jump forwards after it ends (the city doesn't remove schedules
+	// immediately)
 	if !hadExplicitFromOrToYear && !er.From.IsZero() && !er.To.IsZero() {
-		if scheduleDate.Before(from) || scheduleDate.After(to) {
-			fromDec, toDec := from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
-			if abs(scheduleDate.Sub(toDec))+6*30*24*time.Hour <= abs(scheduleDate.Sub(from)) { // approximate, as above
-				from, to = fromDec, toDec
-			}
-		}
-	}
-
-	// or, if the assumed range with a guessed year is probably a non-short-term
-	// schedule, doesn't start soon, and appears to be in the future, it might
-	// actually just be one that recently ended and hasn't been removed yet
-	// (e.g., Johnny Leroux "ice sports - September 9 to March 31")
-	if !hadExplicitFromOrToYear && !er.From.IsZero() && !er.To.IsZero() {
-		// future schedule
 		if scheduleDate.Before(from) {
-			// long range (not short-term, probably a season schedule)
-			if to.Sub(from) > 4*30*24*time.Hour {
-				// doesn't start soon (again, the city doesn't publish new
-				// schedules more than a month or so ahead of time) (so a
-				// schedule published early doesn't get moved back a year as if
-				// it were an old one)
-				if from.Sub(scheduleDate) > 2*30*24*time.Hour {
-					from, to = from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
-				}
+			if threshold := 35; from.Sub(scheduleDate)+to.Sub(from) > (365-time.Duration(threshold))*24*time.Hour {
+				from, to = from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
 			}
 		}
 	}
