@@ -333,6 +333,26 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 		}
 	}
 
+	// or, if the assumed range with a guessed year is probably a non-short-term
+	// schedule, doesn't start soon, and appears to be in the future, it might
+	// actually just be one that recently ended and hasn't been removed yet
+	// (e.g., Johnny Leroux "ice sports - September 9 to March 31")
+	if !hadExplicitFromOrToYear && !er.From.IsZero() && !er.To.IsZero() {
+		// future schedule
+		if scheduleDate.Before(from) {
+			// long range (not short-term, probably a season schedule)
+			if to.Sub(from) > 4*30*24*time.Hour {
+				// doesn't start soon (again, the city doesn't publish new
+				// schedules more than a month or so ahead of time) (so a
+				// schedule published early doesn't get moved back a year as if
+				// it were an old one)
+				if from.Sub(scheduleDate) > 2*30*24*time.Hour {
+					from, to = from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
+				}
+			}
+		}
+	}
+
 	er.From = schema.MakeDateFromGo(from)
 	er.To = schema.MakeDateFromGo(to)
 
