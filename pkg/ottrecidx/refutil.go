@@ -321,10 +321,11 @@ func (ref ScheduleRef) ComputeEffectiveDateRange() (er schema.DateRange, ok bool
 	// (regardless of whether we decrement the year), keep it in the past for a
 	// number of days after it would have ended if in the past so it doesn't
 	// jump forwards after it ends (the city doesn't remove schedules
-	// immediately)
+	// immediately) (see 297517856050a6cb0bdee6fd9e28ca723ec8cf6d for a more
+	// detailed explanation)
 	if !hadExplicitFromOrToYear && !er.From.IsZero() && !er.To.IsZero() {
 		if scheduleDate.Before(from) {
-			if threshold := 35; from.Sub(scheduleDate)+to.Sub(from) > (365-time.Duration(threshold))*24*time.Hour {
+			if threshold := 35; scheduleDate.Sub(to.AddDate(-1, 0, 0)) < time.Duration(threshold)*24*time.Hour {
 				from, to = from.AddDate(-1, 0, 0), to.AddDate(-1, 0, 0)
 			}
 		}
