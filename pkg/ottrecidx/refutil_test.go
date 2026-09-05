@@ -12,7 +12,7 @@ import (
 func TestComputeEffectiveDateRange(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		now      string // scrape time, default 2026-06-01
+		now      string // scrape time, default 2026-06-01, "none" for none, "other-facility-has-one" to only have it on a separate facility
 		date     string
 		from, to int32   // scraped (MMDDW), 0 if open
 		unset    bool    // range not parsed
@@ -38,7 +38,9 @@ func TestComputeEffectiveDateRange(t *testing.T) {
 		{"headers/caption-wins", "", "September 8 to December 20", 9_08_0, 12_20_0, false, []int32{9_05_7}, true, 2026_09_08_3, 2026_12_20_1}, // not if caption
 		{"headers/contiguous-at-limit", "", "", 0, 0, true, []int32{9_07_2, 9_14_2}, true, 2026_09_07_2, 2026_09_14_2},
 		{"headers/contiguous-past-limit", "", "", 0, 0, true, []int32{9_07_2, 9_15_3}, false, 0, 0},
-		{"headers/contiguous-distant", "", "", 0, 0, true, []int32{9_07_2, 10_13_3}, false, 0, 0},
+		{"headers/contiguous-not", "", "", 0, 0, true, []int32{9_07_2, 10_13_3}, false, 0, 0},
+		{"headers/missing-day", "", "", 0, 0, true, []int32{9_00_0, 9_08_3}, false, 0, 0},
+		{"headers/missing-month", "", "", 0, 0, true, []int32{70 /* day 7, no month */, 9_08_3}, false, 0, 0},
 
 		// ranges spanning years
 		{"new-year/before", "2026-12-30", "December 29 to January 4", 12_29_0, 1_04_0, false, nil, true, 2026_12_29_3, 2027_01_04_2},                 // schedule year decrement
@@ -73,6 +75,32 @@ func TestComputeEffectiveDateRange(t *testing.T) {
 		{"year-to-not-from/new-year-during", "2026-01-05", "December 25 to January 10, 2026", 12_25_0, 2026_01_10_0, false, nil, true, 2025_12_25_5, 2026_01_10_7},
 		{"year-to-not-from/new-year-later", "2026-06-01", "December 25 to January 10, 2026", 12_25_0, 2026_01_10_0, false, nil, true, 2025_12_25_5, 2026_01_10_7},
 		{"year-to-not-from/before-next-year", "2026-06-01", "October 7 to December 30, 2025", 10_07_0, 2025_12_30_0, false, nil, true, 2025_10_07_3, 2025_12_30_3},
+
+		// year only on from date
+		{"year-from-not-to", "", "October 7, 2025 to March 10", 2025_10_07_0, 3_10_0, false, nil, true, 2025_10_07_3, 2026_03_10_3},
+
+		// partially resolved underspecified effective date ranges
+		{"partial/from-no-day", "", "October to December 30", 10_00_0, 12_30_0, false, nil, true, 2026_10_01_5, 2026_12_30_4},
+		{"partial/to-no-month", "", "October 7 to 30", 10_07_0, 300 /* day 30, no month; a leading 0 would be octal */, false, nil, true, 2026_10_07_4, 2026_10_30_6},
+		{"partial/to-no-day", "", "October 7 to December", 10_07_0, 12_00_0, false, nil, true, 2026_10_07_4, 2026_12_31_5},
+		{"partial/to-no-day-year-from-to", "", "October 7 to March 2026", 10_07_0, 2026_03_00_0, false, nil, true, 2025_10_07_3, 2026_03_31_3},
+
+		// malformed ranges
+		{"invalid/from-not-a-date", "", "June 38 to July 5", 6_38_0, 7_05_0, false, nil, false, 0, 0},
+		{"invalid/from-no-month", "", "7 to July 5", 70 /* day 7, no month */, 7_05_0, false, nil, false, 0, 0},
+		{"invalid/to-no-month-no-from", "", "until 30", 0, 300 /* day 30, no month */, false, nil, false, 0, 0},
+		{"invalid/explicitly-backwards", "", "October 7, 2026 to March 10, 2025", 2026_10_07_0, 2025_03_10_0, false, nil, false, 0, 0},
+
+		// dataset time fallback when no facility scrape time
+		{"no-scrape-time/from", "none", "September 8 to December 20", 9_08_0, 12_20_0, false, nil, false, 0, 0},                                                // cannot assume year
+		{"no-scrape-time/to", "none", "until March 10", 0, 3_10_0, false, nil, false, 0, 0},                                                                    // ^
+		{"no-scrape-time/from-dataset", "other-facility-has-one", "September 8 to December 20", 9_08_0, 12_20_0, false, nil, true, 2026_09_08_3, 2026_12_20_1}, // special case (see below)
+
+		// some more edge cases
+		{"misc/month-before-scrape-month", "2026-06-01", "until March 10", 0, 3_10_0, false, nil, true, 0, 2027_03_10_4},
+		{"misc/to-invalid", "", "October 7 to June 38", 10_07_0, 6_38_0, false, nil, false, 0, 0},
+		{"misc/from-no-day-year-from-to", "", "October to March 10, 2026", 10_00_0, 2026_03_10_0, false, nil, true, 2025_10_01_4, 2026_03_10_3},
+		{"misc/shifts-forward-open-ended", "2026-12-01", "starting February 1", 2_01_0, 0, false, nil, true, 2027_02_01_2, 0}, // range with no to, but a potentially future from, always is in the future
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var pb []byte
@@ -96,13 +124,15 @@ func TestComputeEffectiveDateRange(t *testing.T) {
 
 				var src schema.Source_builder
 				now := time.Date(2026, time.June, 1, 0, 0, 0, 0, TZ)
-				if tc.now != "" {
+				if tc.now != "" && tc.now != "none" && tc.now != "other-facility-has-one" {
 					var err error
 					if now, err = time.ParseInLocation(time.DateOnly, tc.now, TZ); err != nil {
 						panic(err)
 					}
 				}
-				src.XDate = timestamppb.New(now)
+				if tc.now != "none" && tc.now != "other-facility-has-one" {
+					src.XDate = timestamppb.New(now)
+				}
 
 				var fac schema.Facility_builder
 				fac.Name = "Test Facility"
@@ -111,6 +141,15 @@ func TestComputeEffectiveDateRange(t *testing.T) {
 
 				var data schema.Data_builder
 				data.Facilities = []*schema.Facility{fac.Build()}
+				if tc.now == "other-facility-has-one" {
+					// special case: other facility has a date
+					var osrc schema.Source_builder
+					osrc.XDate = timestamppb.New(now)
+					var other schema.Facility_builder
+					other.Name = "Other Facility"
+					other.Source = osrc.Build()
+					data.Facilities = append(data.Facilities, other.Build())
+				}
 
 				buf, err := proto.Marshal(data.Build())
 				if err != nil {
