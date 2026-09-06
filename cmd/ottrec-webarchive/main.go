@@ -18,7 +18,6 @@ import (
 	"io/fs"
 	"iter"
 	"log/slog"
-	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -279,7 +278,7 @@ type server struct {
 	versions []version      // in display order, and commit hash -> version
 	index    map[string]int // index
 
-	trees   memo[string, map[string]string] // rev -> sha1(url) -> filename
+	trees   memo[string, commitTree]        // rev -> what is in it
 	entries memo[string, []entry]           // rev -> cache entries, sorted by url
 	urls    memo[string, map[string]string] // rev -> url -> filename
 	hist    memo[string, []change]          // page -> versions at which it changed
@@ -287,6 +286,7 @@ type server struct {
 
 	changes changelog   // what changed in each commit, by entry
 	digests digestCache // blob -> what it says, for classifying changes
+	metas   metaCache   // blob -> what it says it is, for listing entries
 	cache   *cacheFile  // where both are kept between runs, nil if nowhere
 }
 
@@ -1018,10 +1018,9 @@ func startTag(n *html.Node) string {
 
 // retitle wraps the page title, falling back to middle if the page has none.
 func retitle(body []byte, prefix, middle, suffix string) []byte {
-	lower := bytes.ToLower(body)
-	if i := bytes.Index(lower, []byte("<title")); i >= 0 {
+	if i := indexFold(body, []byte("<title")); i >= 0 {
 		if j := bytes.IndexByte(body[i:], '>'); j >= 0 {
-			if k := bytes.Index(lower[i+j+1:], []byte("</title>")); k >= 0 {
+			if k := indexFold(body[i+j+1:], []byte("</title>")); k >= 0 {
 				i, k = i+j+1, i+j+1+k
 				return slices.Concat(body[:i], []byte(htmlpkg.EscapeString(prefix)), body[i:k],
 					[]byte(htmlpkg.EscapeString(suffix)), body[k:])
@@ -1044,7 +1043,7 @@ func insertInHead(body []byte, frag string) []byte {
 // insertAfter puts a fragment after the given start tag, falling back to the
 // start or the end of the document.
 func insertAfter(body []byte, tag, frag string, prepend bool) []byte {
-	if i := bytes.Index(bytes.ToLower(body), []byte(tag)); i >= 0 {
+	if i := indexFold(body, []byte(tag)); i >= 0 {
 		if j := bytes.IndexByte(body[i:], '>'); j >= 0 {
 			i += j + 1
 			return slices.Concat(body[:i], []byte(frag), body[i:])
@@ -1246,12 +1245,69 @@ func entryHead(buf []byte) string {
 	return strings.TrimSpace(string(head))
 }
 
-// pageTitle extracts the title of an html page, without parsing it (this runs
-// over every entry of a version). The site suffixes every title with the site
-// name, which is only noise here.
+// indexFold is like [bytes.Index], but matches ASCII letters in either case.
+// sub must be lowercase.
+func indexFold(b, sub []byte) int {
+	if len(sub) == 0 {
+		return 0
+	}
+	lo := sub[0]
+	up := lo
+	if lo >= 'a' && lo <= 'z' {
+		up = lo - ('a' - 'A')
+	}
+	for i := 0; i+len(sub) <= len(b); i++ {
+		rest := b[i : len(b)-len(sub)+1]
+		j := bytes.IndexByte(rest, lo)
+		if up != lo {
+			if k := bytes.IndexByte(rest, up); k >= 0 && (j < 0 || k < j) {
+				j = k
+			}
+		}
+		if j < 0 {
+			return -1
+		}
+		if i += j; bytes.EqualFold(b[i:i+len(sub)], sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastIndexFold is like [bytes.LastIndex], but matches ASCII letters in either
+// case. sub must be lowercase.
+func lastIndexFold(b, sub []byte) int {
+	if len(sub) == 0 {
+		return len(b)
+	}
+	lo := sub[0]
+	up := lo
+	if lo >= 'a' && lo <= 'z' {
+		up = lo - ('a' - 'A')
+	}
+	for i := len(b) - len(sub); i >= 0; {
+		j := bytes.LastIndexByte(b[:i+1], lo)
+		if up != lo {
+			if k := bytes.LastIndexByte(b[:i+1], up); k > j {
+				j = k
+			}
+		}
+		if j < 0 {
+			return -1
+		}
+		if bytes.EqualFold(b[j:j+len(sub)], sub) {
+			return j
+		}
+		i = j - 1
+	}
+	return -1
+}
+
+// pageTitle extracts the title of an html page, without parsing it or copying
+// it (this runs over every blob in the repo). The site suffixes every title
+// with the site name, which is only noise here.
 func pageTitle(body []byte) string {
-	lower := bytes.ToLower(body)
-	i := bytes.Index(lower, []byte("<title"))
+	i := indexFold(body, []byte("<title"))
 	if i < 0 {
 		return ""
 	}
@@ -1260,7 +1316,7 @@ func pageTitle(body []byte) string {
 		return ""
 	}
 	i += j + 1
-	k := bytes.Index(lower[i:], []byte("</title>"))
+	k := indexFold(body[i:], []byte("</title>"))
 	if k < 0 {
 		return ""
 	}
@@ -1399,7 +1455,7 @@ func (s *view) inject(ctx context.Context, h http.Header, body []byte, r *http.R
 	}
 
 	overlay := s.overlay(nonce, cur, changes, dated, u, pages)
-	if i := bytes.LastIndex(bytes.ToLower(body), []byte("</body>")); i >= 0 {
+	if i := lastIndexFold(body, []byte("</body>")); i >= 0 {
 		return slices.Concat(body[:i], []byte(overlay), body[i:])
 	}
 	return slices.Concat(body, []byte(overlay))
@@ -2247,49 +2303,83 @@ func gitExec(ctx context.Context, dir string, arg ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// tree indexes the cache entries of a commit by the sha1 of their url.
-func (s *server) tree(ctx context.Context, hash string) (map[string]string, error) {
-	return s.trees.get(ctx, hash, func(hash string) (map[string]string, error) {
-		buf, err := s.git(ctx, "ls-tree", "-r", "--name-only", "--end-of-options", hash)
+// treeEntry is one cache entry of a commit.
+type treeEntry struct {
+	name string
+	oid  string // the blob it is, which is what everything about it is keyed by
+}
+
+// commitTree is what a commit has in it: its entries in name order, and where
+// to find one by the url it was cached under.
+type commitTree struct {
+	entries []treeEntry
+	byKey   map[string]string // sha1(url) -> filename
+}
+
+// tree lists the cache entries of a commit.
+func (s *server) tree(ctx context.Context, hash string) (commitTree, error) {
+	return s.trees.get(ctx, hash, func(hash string) (commitTree, error) {
+		buf, err := s.git(ctx, "ls-tree", "-r", "--end-of-options", hash)
 		if err != nil {
-			return nil, err
+			return commitTree{}, err
 		}
-		m := map[string]string{}
+		t := commitTree{byKey: map[string]string{}}
 		for line := range strings.Lines(string(buf)) {
-			name := strings.TrimSpace(line)
+			// `<mode> <type> <oid>\t<name>`
+			info, name, ok := strings.Cut(strings.TrimRight(line, "\n"), "\t")
+			if !ok {
+				continue
+			}
+			f := strings.Fields(info)
+			if len(f) != 3 || f[1] != "blob" {
+				continue
+			}
+			t.entries = append(t.entries, treeEntry{name: name, oid: f[2]})
 			if key, ok := entryKey(name); ok {
-				m[key] = name
+				t.byKey[key] = name
 			}
 		}
-		return m, nil
+		slices.SortFunc(t.entries, func(a, b treeEntry) int { return cmp.Compare(a.name, b.name) })
+		return t, nil
 	})
 }
 
 // list gets the cached urls of a commit, sorted.
 func (s *server) list(ctx context.Context, hash string) ([]entry, error) {
 	return s.entries.get(ctx, hash, func(hash string) ([]entry, error) {
-		tree, err := s.tree(ctx, hash)
+		t, err := s.tree(ctx, hash)
 		if err != nil {
 			return nil, err
 		}
-		names := slices.Sorted(maps.Values(tree))
 
-		specs := make([]string, len(names))
-		for i, name := range names {
-			specs[i] = hash + ":" + name
+		// most of a commit's entries are the same blobs as the commit before
+		// it, and everything the precache has been through is already known
+		var (
+			es   = make([]entry, 0, len(t.entries))
+			need []string             // blobs still to read
+			at   = map[string][]int{} // blob -> the entries waiting on it
+		)
+		for i, te := range t.entries {
+			if m, ok := s.metas.get(te.oid); ok {
+				if m.URL != "" { // an empty one isn't a stored response
+					es = append(es, entry{Name: te.name, URL: m.URL, Title: m.Title, HTML: m.HTML})
+				}
+				continue
+			}
+			if _, waiting := at[te.oid]; !waiting {
+				need = append(need, te.oid)
+			}
+			at[te.oid] = append(at[te.oid], i)
 		}
-
-		es := make([]entry, 0, len(names))
-		if err := s.catEach(ctx, specs, func(i int, buf []byte) error {
-			req, resp, body, err := parseEntry(buf)
-			if err != nil {
-				return nil // missing, or not a stored response
+		if err := s.catEach(ctx, need, func(i int, buf []byte) error {
+			oid := need[i]
+			m := entryMeta(buf)
+			s.metas.put(oid, m)
+			for _, j := range at[oid] {
+				if m.URL != "" {
+					es = append(es, entry{Name: t.entries[j].name, URL: m.URL, Title: m.Title, HTML: m.HTML})
+				}
 			}
-			e := entry{Name: names[i], URL: req.URL.String()}
-			if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
-				e.HTML, e.Title = true, pageTitle(body)
-			}
-			es = append(es, e)
 			return nil
 		}); err != nil {
 			return nil, err
@@ -2598,8 +2688,9 @@ func (s *server) classify(ctx context.Context, cs []change) error {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			d := digestEntry(buf)
+			d, m := digestEntry(buf)
 			s.digests.put(oid, d)
+			s.metas.put(oid, m) // read once, and listing a commit needs it too
 			for _, j := range at[oid] {
 				ds[j] = d
 			}
@@ -2677,18 +2768,19 @@ type digest struct {
 	sched string // text in the main content tables (drop-in schedules)
 }
 
-func digestEntry(buf []byte) digest {
-	_, resp, body, err := parseEntry(buf)
+func digestEntry(buf []byte) (digest, meta) {
+	req, resp, body, err := parseEntry(buf)
 	if err != nil {
-		return digest{full: hashBytes(buf)}
+		return digest{full: hashBytes(buf)}, meta{}
 	}
-	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "html") {
-		return digest{full: hashBytes(body)}
-	}
+	m := entryMetaOf(req, resp, body)
 
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "html") {
+		return digest{full: hashBytes(body)}, m
+	}
 	doc, err := html.Parse(bytes.NewReader(body))
 	if err != nil {
-		return digest{full: hashBytes(body)}
+		return digest{full: hashBytes(body)}, m
 	}
 
 	d := digest{full: hashText(doc)}
@@ -2696,7 +2788,86 @@ func digestEntry(buf []byte) digest {
 		d.main = hashText(main)
 		d.sched = hashText(slices.Collect(elements(main, atom.Table))...)
 	}
-	return d
+	return d, m
+}
+
+// meta is what a stored response says about itself, which is everything the
+// entry listing and the page sidebar need.
+type meta struct {
+	URL   string
+	Title string
+	HTML  bool
+}
+
+// entryMeta reads a stored response's metadata, without digesting it.
+func entryMeta(buf []byte) meta {
+	req, resp, body, err := parseEntry(buf)
+	if err != nil {
+		return meta{} // missing, or not a stored response
+	}
+	return entryMetaOf(req, resp, body)
+}
+
+func entryMetaOf(req *http.Request, resp *http.Response, body []byte) meta {
+	m := meta{URL: req.URL.String()}
+	if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		m.HTML, m.Title = true, pageTitle(body)
+	}
+	return m
+}
+
+// metaCache holds what a blob says it is, so listing a commit's entries doesn't
+// have to read them. Keyed by the blob, like the digests; the urls and titles
+// are shared, since a few hundred of them cover every version of every page.
+type metaCache struct {
+	mu   sync.Mutex
+	m    map[string]meta
+	strs map[string]string
+	file *cacheFile // where they're kept between runs, nil if nowhere
+}
+
+func (mc *metaCache) get(oid string) (meta, bool) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	m, ok := mc.m[oid]
+	return m, ok
+}
+
+// add remembers what a blob is for as long as the process lives.
+func (mc *metaCache) add(oid string, m meta) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	if mc.m == nil {
+		mc.m, mc.strs = map[string]meta{}, map[string]string{}
+	}
+	m.URL, m.Title = mc.internLocked(m.URL), mc.internLocked(m.Title)
+	mc.m[oid] = m
+}
+
+// put remembers what a blob is, and writes it out so the next run doesn't have
+// to read it again.
+func (mc *metaCache) put(oid string, m meta) {
+	mc.add(oid, m)
+
+	mc.mu.Lock()
+	file := mc.file
+	mc.mu.Unlock()
+
+	if file != nil {
+		file.putMeta(oid, m)
+	}
+}
+
+// internLocked shares one copy of a string. The lock is held.
+func (mc *metaCache) internLocked(s string) string {
+	if s == "" {
+		return ""
+	}
+	if v, ok := mc.strs[s]; ok {
+		return v
+	}
+	mc.strs[s] = s
+	return s
 }
 
 // tier is how significant the change from prev to d is.
@@ -2804,11 +2975,11 @@ var noText = map[atom.Atom]bool{
 func (s *view) resolve(ctx context.Context, cur int, key string, u *url.URL) (string, error) {
 	hash := s.versions[cur].Hash
 
-	tree, err := s.tree(ctx, hash)
+	t, err := s.tree(ctx, hash)
 	if err != nil {
 		return "", err
 	}
-	if name, ok := tree[key]; ok {
+	if name, ok := t.byKey[key]; ok {
 		return name, nil
 	}
 
@@ -2960,12 +3131,14 @@ const (
 	// version is bumped when what it holds is derived differently:
 	//   digests - digestEntry, hashText, texts, noText, mainID
 	//   commits - what rescan reads out of git log
+	//   metas   - entryMetaOf, pageTitle
 	// A file which doesn't match is written again from scratch.
-	cacheFormat = "ottrec-webarchive cache: format 1, digests 1, commits 1\n"
+	cacheFormat = "ottrec-webarchive cache: format 1, digests 1, commits 1, metas 1\n"
 
 	kindDigest = 1 // one blob's digest
 	kindCommit = 2 // what one commit changed
 	kindScan   = 3 // the commit the scan had reached, after the commits it covers
+	kindMeta   = 4 // what one blob says it is
 
 	cacheFlushEvery = time.Second * 5
 	cacheFlushSize  = 1 << 20
@@ -3009,15 +3182,16 @@ func (s *server) useCache(ctx context.Context, dir string) {
 		slog.Error("cache: carrying on without one", "dir", dir, "error", err)
 		return
 	}
-	digests, commits, err := c.load(&s.digests, &s.changes)
+	n, err := c.load(&s.digests, &s.metas, &s.changes)
 	if err != nil {
 		slog.Error("cache: carrying on without one", "path", c.path, "error", err)
 		return
 	}
-	s.digests.file, s.cache = c, c
+	s.digests.file, s.metas.file, s.cache = c, c, c
 	go c.run(ctx)
 
-	slog.Info("cache: read", "path", c.path, "digests", digests, "commits", commits, "took", time.Since(start))
+	slog.Info("cache: read", "path", c.path,
+		"digests", n[kindDigest], "metas", n[kindMeta], "commits", n[kindCommit], "took", time.Since(start))
 }
 
 // run writes out what has been recorded, until ctx is done.
@@ -3037,24 +3211,25 @@ func (c *cacheFile) run(ctx context.Context) {
 
 // load reads the file, reporting how much was in it. Anything it can't read is
 // dropped: this is a cache, so it is simply worked out again.
-func (c *cacheFile) load(dc *digestCache, cl *changelog) (digests, commits int, err error) {
+func (c *cacheFile) load(dc *digestCache, mc *metaCache, cl *changelog) (n map[byte]int, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	n = map[byte]int{}
 	if _, err := c.f.Seek(0, io.SeekStart); err != nil {
-		return 0, 0, err
+		return n, err
 	}
 	r := bufio.NewReader(c.f)
 
 	line, err := r.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return 0, 0, err
+		return n, err
 	}
 	if line != cacheFormat {
 		if line != "" {
 			slog.Info("cache: written by a different version, starting it again", "path", c.path)
 		}
-		return 0, 0, c.resetLocked()
+		return n, c.resetLocked()
 	}
 
 	var (
@@ -3086,7 +3261,15 @@ func (c *cacheFile) load(dc *digestCache, cl *changelog) (digests, commits int, 
 				continue
 			}
 			dc.add(oid, d)
-			digests++
+			n[kindDigest]++
+		case kindMeta:
+			oid, m, ok := parseMeta(p)
+			if !ok {
+				bad = true
+				continue
+			}
+			mc.add(oid, m)
+			n[kindMeta]++
 		case kindCommit:
 			hash, rs, ok := parseCommit(p, names)
 			if !ok {
@@ -3095,7 +3278,7 @@ func (c *cacheFile) load(dc *digestCache, cl *changelog) (digests, commits int, 
 			}
 			hashes = append(hashes, hash)
 			batch = append(batch, rs...)
-			commits++
+			n[kindCommit]++
 		case kindScan:
 			if len(p) == sha1.Size {
 				tip = hex.EncodeToString(p)
@@ -3111,10 +3294,10 @@ func (c *cacheFile) load(dc *digestCache, cl *changelog) (digests, commits int, 
 	if st, err := c.f.Stat(); err == nil && st.Size() > off {
 		slog.Warn("cache: dropping an unfinished write at the end", "path", c.path, "bytes", st.Size()-off)
 		if err := c.f.Truncate(off); err != nil {
-			return digests, commits, err
+			return n, err
 		}
 	}
-	return digests, commits, nil
+	return n, nil
 }
 
 // resetLocked empties the file and writes the format line. The lock is held.
@@ -3134,6 +3317,20 @@ func (c *cacheFile) putDigest(oid string, d digest) {
 	var ok bool
 	if c.scratch, ok = appendDigest(c.scratch[:0], oid, d); ok {
 		c.record(kindDigest, c.scratch)
+	}
+	if len(c.pending) >= cacheFlushSize {
+		c.flushLocked()
+	}
+}
+
+// putMeta records what a blob says it is.
+func (c *cacheFile) putMeta(oid string, m meta) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var ok bool
+	if c.scratch, ok = appendMeta(c.scratch[:0], oid, m); ok {
+		c.record(kindMeta, c.scratch)
 	}
 	if len(c.pending) >= cacheFlushSize {
 		c.flushLocked()
@@ -3247,6 +3444,43 @@ func parseDigest(p []byte) (string, digest, bool) {
 		}
 	}
 	return hex.EncodeToString(p[:sha1.Size]), d, true
+}
+
+// appendMeta encodes what a blob says it is. An empty one is a blob which
+// isn't a stored response, and is worth recording so it isn't read again.
+func appendMeta(buf []byte, oid string, m meta) ([]byte, bool) {
+	raw, err := hex.DecodeString(oid)
+	if err != nil || len(raw) != sha1.Size {
+		return buf, false
+	}
+	buf = append(buf, raw...)
+	if m.HTML {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+	for _, s := range [2]string{m.URL, m.Title} {
+		buf = binary.AppendUvarint(buf, uint64(len(s)))
+		buf = append(buf, s...)
+	}
+	return buf, true
+}
+
+func parseMeta(p []byte) (string, meta, bool) {
+	if len(p) < sha1.Size+1 {
+		return "", meta{}, false
+	}
+	m := meta{HTML: p[sha1.Size] == 1}
+	oid, p := hex.EncodeToString(p[:sha1.Size]), p[sha1.Size+1:]
+
+	for _, s := range [2]*string{&m.URL, &m.Title} {
+		size, w := binary.Uvarint(p)
+		if w <= 0 || size > uint64(len(p)-w) {
+			return "", meta{}, false
+		}
+		*s, p = string(p[w:w+int(size)]), p[w+int(size):]
+	}
+	return oid, m, true
 }
 
 // appendCommit encodes what one commit changed. It is one record, so it is
