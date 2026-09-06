@@ -941,7 +941,8 @@ func (s *view) serveIndex(w http.ResponseWriter, r *http.Request, cur int, dated
 
 	var b strings.Builder
 	b.WriteString(`<!DOCTYPE html><html><head><title>cache index</title></head>` +
-		`<body style="font:14px/1.6 Roboto,system-ui,sans-serif;margin:2rem;max-width:60rem">`)
+		`<body style="font:14px/1.6 Roboto,system-ui,sans-serif;margin:min(2rem,5vw);` +
+		`max-width:60rem;overflow-wrap:break-word">`)
 	fmt.Fprintf(&b, `<p style="color:#6F6E69">%d entries, %s</p><ul style="padding-left:1.2rem">`,
 		len(entries), htmlpkg.EscapeString(s.versions[cur].Time.In(ottrecidx.TZ).Format("Mon 2006-01-02")))
 	for _, e := range entries {
@@ -1651,7 +1652,8 @@ func tierLabel(tier int) string {
 }
 
 const overlayCSS = `
-html{--cp-h:6rem;--cp-w:15rem;color-scheme:light dark}
+/* the scroll padding keeps a fragment jump from landing under the fixed bar */
+html{--cp-h:6rem;--cp-w:15rem;color-scheme:light dark;scroll-padding-top:calc(var(--cp-h) + .5rem)}
 body{padding-top:var(--cp-h);padding-left:var(--cp-w)}
 #__cp{position:fixed;left:0;right:0;top:0;z-index:2147483647;
  background:light-dark(#FFFCF0,#100F0F);border-bottom:1px solid light-dark(#E6E4D9,#282726);
@@ -2038,9 +2040,31 @@ const overlayJS = `
 
  // the page which is currently rendered: popstate fires after location has
  // already changed, so the outgoing one can't be read back off the url
- let here=location.pathname
+ const loc=u=>u.pathname+u.search
+ let here=loc(location)
  // a version switch stays on the same page: only the timestamp segment changes
  const page=p=>p.replace(/^\/\d{4,14}(\.\d+)?(?=\/)/,'')
+
+ // the scroll position rides along in the history entry: a client-side swap
+ // lands long after the popstate, so the browser can't restore it itself (and
+ // is told not to try). it is written on a trailing timer rather than on every
+ // scroll, since safari rate-limits replacestate
+ let syt=0
+ const savePos=()=>{
+  clearTimeout(syt)
+  syt=0
+  try{history.replaceState({y:Math.round(scrollY)},'')}catch(e){}
+ }
+ const scrollHash=hash=>{
+  if(!hash)return null
+  let el=null
+  try{el=document.getElementById(decodeURIComponent(hash.slice(1)))}catch(e){}
+  if(el)el.scrollIntoView()
+  return el
+ }
+ addEventListener('scroll',()=>{
+  if(!syt)syt=setTimeout(savePos,400)
+ },{passive:true})
 
  let ctl=null
  const fail=(url,err)=>{
@@ -2058,16 +2082,16 @@ const overlayJS = `
   },4000)
  }
 
- const go=async(href,pop)=>{
+ const go=async(href,pop,y)=>{
   const url=new URL(href,location.href)
   ctl?.abort() // a newer click supersedes whatever is still in flight
   const c=ctl=new AbortController()
   const wrap=q('#__cpw'), side=q('#__cpsb')
   // the reading position and the seekbar scroll are only worth keeping across
   // a version switch; a different page re-centers on the version being viewed
-  const same=page(url.pathname)===page(here)
+  const same=page(loc(url))===page(here)
   const at=same&&wrap?wrap.scrollLeft:null, top=side?side.scrollTop:0
-  const keep=same?anchor():null
+  const keep=same&&!pop?anchor():null
   document.documentElement.dataset.cpBusy='1'
   try{
    const res=await fetch(url,{credentials:'same-origin',signal:c.signal})
@@ -2077,7 +2101,10 @@ const overlayJS = `
     return
    }
    const doc=new DOMParser().parseFromString(await res.text(),'text/html')
-   if(!pop)history.pushState(null,'',res.url||url)
+   if(!pop){
+    savePos() // the outgoing entry, before the body it belongs to goes away
+    history.pushState(null,'',res.url||url)
+   }
    document.title=doc.title
    const was=document.querySelector('link[rel="canonical"]'), now=doc.querySelector('link[rel="canonical"]')
    if(was)was.remove()
@@ -2091,12 +2118,14 @@ const overlayJS = `
    const sb=q('#__cpsb')
    if(sb)sb.scrollTop=top
    const el=keep&&document.getElementById(keep.id)
-   scrollTo(0,el?Math.max(0,scrollY+el.getBoundingClientRect().top-keep.top):0)
+   if(el)scrollTo(0,Math.max(0,scrollY+el.getBoundingClientRect().top-keep.top))
+   else if(pop)scrollTo(0,y||0)
+   else if(!scrollHash(url.hash))scrollTo(0,0)
   }catch(err){
    if(c.signal.aborted)return
    fail(url.href,err)
   }finally{
-   here=location.pathname
+   here=loc(location)
    if(ctl===c)ctl=null
    if(!ctl)delete document.documentElement.dataset.cpBusy
   }
@@ -2108,15 +2137,23 @@ const overlayJS = `
   if(!a||a.target||a.hasAttribute('download'))return
   const url=new URL(a.getAttribute('href'),location.href)
   if(url.origin!==location.origin)return
-  if(url.hash&&url.pathname===location.pathname&&url.search===location.search)return
+  // an in-page jump is the browser's to make; the entry it leaves behind still
+  // needs its position, since the pending write would land on the new one
+  if(url.hash&&url.pathname===location.pathname&&url.search===location.search){
+   savePos()
+   return
+  }
   e.preventDefault()
   go(url.href)
  })
- // the drawer's scrim is only a shadow, so closing it needs a hand
+ // the drawer's scrim is only a shadow, so closing it needs a hand. the
+ // hamburger is a label, and the click it forwards to its checkbox bubbles up
+ // here too, from a target outside the drawer: ignoring it is what stops
+ // opening the drawer from closing it again
  addEventListener('click',e=>{
   const menu=q('#__cpm')
   if(!menu||!menu.checked||!(e.target instanceof Element))return
-  if(e.target.closest('#__cpsb,#__cpmb,label[for="__cpm"]'))return
+  if(e.target===menu||e.target.closest('#__cpsb,#__cpmb,label[for="__cpm"]'))return
   menu.checked=false
  })
  addEventListener('keydown',e=>{
@@ -2127,13 +2164,30 @@ const overlayJS = `
   if(e.key==='theme'||e.key===null)applyTheme(savedTheme())
   if(e.key==='unchanged'||e.key===null)applyUnchanged(showsUnchanged())
  })
- addEventListener('popstate',()=>go(location.href,true))
+ addEventListener('popstate',()=>{
+  // the pending write belongs to the entry we just left, which can no longer
+  // be addressed; and the position to restore has to be read now, before the
+  // swap gives anything else a chance to overwrite it
+  clearTimeout(syt)
+  syt=0
+  const y=(history.state&&history.state.y)||0
+  // a hash-only step stays on the rendered page: re-fetching it would only
+  // throw away the reading position
+  if(loc(location)===here){
+   if(!scrollHash(location.hash))scrollTo(0,y)
+   return
+  }
+  go(location.href,true,y)
+ })
  addEventListener('resize',()=>{fit();fade()})
  try{
   bind(null)
  }catch(err){
   console.error('ottrec-webarchive: bind:',err) // the page is still usable unbound
  }
+ try{history.scrollRestoration='manual'}catch(e){}
+ // a reload or a bfcache miss comes back through here rather than popstate
+ if(!location.hash&&history.state&&history.state.y)scrollTo(0,history.state.y)
 })()
 `
 
