@@ -1724,6 +1724,17 @@ body{padding-top:var(--cp-h);padding-left:var(--cp-w)}
  font-variant-numeric:tabular-nums;min-height:1.4em}
 #__cpsc{white-space:pre}
 [data-cp-busy] #__cps{opacity:.45}
+/* a swipe far enough to seek takes the content with it, so the finger has said
+   something before it is lifted. the bar itself stays where it is */
+:root[data-cp-swipe] body>*:not(#__cp){transform:translateX(var(--cp-sx,0));opacity:var(--cp-so,1)}
+:root[data-cp-swipe="settle"] body>*:not(#__cp){transition:transform .2s ease-out,opacity .2s ease-out}
+:root[data-cp-swipe="out"] body>*:not(#__cp){transition:transform .25s ease-in,opacity .25s ease-in}
+/* clip rather than hidden: the nudge mustn't turn the page into something which
+   scrolls sideways by the width of it */
+:root[data-cp-swipe]{overflow-x:clip}
+@media (prefers-reduced-motion:reduce){
+ :root[data-cp-swipe] body>*:not(#__cp){transform:none}
+}
 /* the checkboxes are only state: the label and the hamburger are the ui */
 #__cpx,#__cpm{position:absolute;width:1px;height:1px;margin:0;opacity:0;pointer-events:none}
 #__cp label[for="__cpx"]{flex:none;cursor:pointer;white-space:nowrap;user-select:none;
@@ -2182,7 +2193,10 @@ const overlayJS = `
    fail(url.href,err)
   }finally{
    here=loc(location)
-   if(ctl===c)ctl=null
+   if(ctl===c){
+    ctl=null
+    nudge(null) // not if a newer one superseded this, since it may have nudged
+   }
    if(!ctl)delete document.documentElement.dataset.cpBusy
   }
  }
@@ -2216,6 +2230,98 @@ const overlayJS = `
   const menu=q('#__cpm')
   if(e.key==='Escape'&&menu&&menu.checked)menu.checked=false
  })
+
+ // swiping sideways seeks, the same way the arrows do: left for newer, the way
+ // the page would move. nothing is prevented, so scrolling, zooming and text
+ // selection carry on as they were
+ let swipe=null, settle=0
+
+ // nudge moves the content along with a swipe which has gone far enough to
+ // seek: past the threshold it follows the finger, at half its speed
+ const nudge=(px,opacity)=>{
+  const r=document.documentElement
+  clearTimeout(settle)
+  if(px===null){
+   r.removeAttribute('data-cp-swipe')
+   r.style.removeProperty('--cp-sx')
+   r.style.removeProperty('--cp-so')
+   return
+  }
+  r.setAttribute('data-cp-swipe','')
+  r.style.setProperty('--cp-sx',px.toFixed(1)+'px')
+  r.style.setProperty('--cp-so',opacity.toFixed(3))
+ }
+ // let go past the threshold: the rest of the way out, since what the swipe
+ // asked for is on its way in. it stays gone until the new page replaces it
+ const finish=dir=>{
+  const r=document.documentElement
+  if(r.getAttribute('data-cp-swipe')!=='')return
+  clearTimeout(settle)
+  r.setAttribute('data-cp-swipe','out')
+  r.style.setProperty('--cp-sx',(dir<0?-30:30)+'vw')
+  r.style.setProperty('--cp-so','0')
+ }
+ // and back where it was, for a swipe which came to nothing
+ const unnudge=()=>{
+  const r=document.documentElement
+  if(r.getAttribute('data-cp-swipe')!=='')return // not nudged, or already going back
+  r.setAttribute('data-cp-swipe','settle')
+  r.style.setProperty('--cp-sx','0px')
+  r.style.setProperty('--cp-so','1')
+  settle=setTimeout(()=>nudge(null),200)
+ }
+ const scrollsX=el=>{
+  for(let n=el instanceof Element?el:null;n&&n!==document.body;n=n.parentElement){
+   if(n.scrollWidth>n.clientWidth+2&&/auto|scroll/.test(getComputedStyle(n).overflowX))return true
+  }
+  return false
+ }
+ addEventListener('touchstart',e=>{
+  const menu=q('#__cpm')
+  // one finger, not on the seekbar or a wide table, and not over the drawer
+  if(e.touches.length!==1||(menu&&menu.checked)||scrollsX(e.target)){
+   swipe=null
+   return
+  }
+  swipe={x:e.touches[0].clientX,y:e.touches[0].clientY,at:Date.now()}
+ },{passive:true})
+ addEventListener('touchmove',e=>{
+  if(e.touches.length!==1){ // a second finger is a pinch, not a swipe
+   swipe=null
+   unnudge()
+   return
+  }
+  if(!swipe)return
+  const t=e.touches[0], dx=t.clientX-swipe.x, dy=t.clientY-swipe.y
+  // the shift goes as far as the finger does. the fade does most of its work
+  // over the first 60px past the threshold, then carries on at a quarter of
+  // the rate, so there is always a little of the page left
+  const over=Math.abs(dx)<Math.abs(dy)*1.5?0:Math.max(0,Math.abs(dx)-50)
+  const f=Math.min(.95,over<=60?over/60*.6:.6+(over-60)/400)
+  if(over)nudge(Math.sign(dx)*over*.5,1-f)
+  else unnudge()
+ },{passive:true})
+ addEventListener('touchcancel',()=>{
+  swipe=null
+  unnudge()
+ },{passive:true})
+ addEventListener('touchend',e=>{
+  const s=swipe, t=e.changedTouches[0]
+  swipe=null
+  if(!s||!t){
+   unnudge()
+   return
+  }
+  const dx=t.clientX-s.x, dy=t.clientY-s.y
+  const seek=root?root.querySelectorAll('.__cpn'):[]
+  const a=dx<0?seek[1]:seek[0] // older, newer, in the order they're rendered
+  if(Date.now()-s.at>700||Math.abs(dx)<50||Math.abs(dx)<Math.abs(dy)*1.5||!a){
+   unnudge()
+   return
+  }
+  finish(dx)
+  go(a.href) // what it left behind stays gone until the new page is in
+ },{passive:true})
  addEventListener('storage',e=>{
   if(e.key==='theme'||e.key===null)applyTheme(savedTheme())
   if(e.key==='unchanged'||e.key===null)applyUnchanged(showsUnchanged())
