@@ -33,6 +33,8 @@ import (
 //go:generate go run fetch.go https://github.com/adobe-fonts/source-serif/raw/5f220b17d27ed64873f22cde0dd593685387bd19/VAR/SourceSerif4Variable-Italic.ttf fonts/sourceserif4it.ttf
 //go:generate go run fetch.go https://github.com/adobe-fonts/source-sans/raw/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e/VF/SourceSans3VF-Upright.ttf fonts/sourcesans3.ttf
 //go:generate go run fetch.go https://github.com/adobe-fonts/source-sans/raw/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e/VF/SourceSans3VF-Italic.ttf fonts/sourcesans3it.ttf
+//go:generate go run fetch.go https://github.com/google/fonts/raw/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf fonts/roboto.ttf
+//go:generate go run fetch.go https://github.com/google/fonts/raw/6183fc0d26361f6ddfd6f6b7a736e1467c6d8a43/ofl/roboto/Roboto-Italic%5Bwdth%2Cwght%5D.ttf fonts/robotoit.ttf
 //go:generate go run fetch.go https://github.com/google/material-design-icons/raw/fe742c4072d4e3b8b899170109d9f710e89f082e/variablefont/MaterialSymbolsOutlined%5BFILL%2CGRAD%2Copsz%2Cwght%5D.ttf fonts/materialsymbolsoutlined.ttf
 
 // Base is the path prefix under which assets are served.
@@ -380,6 +382,8 @@ var (
 	SourceSans3ItalicWOFF2       = assets.Register("fonts/sourcesans3it.ttf", webfont(textFontSubset))
 	SourceSerif4WOFF2            = assets.Register("fonts/sourceserif4.ttf", webfont(textFontSubset))
 	SourceSerif4ItalicWOFF2      = assets.Register("fonts/sourceserif4it.ttf", webfont(textFontSubset))
+	RobotoWOFF2                  = assets.Register("fonts/roboto.ttf", webfont(textFontSubset))
+	RobotoItalicWOFF2            = assets.Register("fonts/robotoit.ttf", webfont(textFontSubset))
 	MaterialSymbolsOutlinedWOFF2 = assets.Register("fonts/materialsymbolsoutlined.ttf", iconfont(
 		map[hbsubset.Tag]hbsubset.AxisRange{
 			hbsubset.MakeTag("FILL"): {Min: 0, Max: 1, Default: 0},
