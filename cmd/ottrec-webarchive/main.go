@@ -118,7 +118,10 @@ func run() error {
 
 	// the history has to be there before anything can be served
 	if *RepoRemote != "" {
-		if err := fetch(ctx); err != nil {
+		ctx, cancel := context.WithTimeout(ctx, updateTimeout)
+		err := fetch(ctx)
+		cancel()
+		if err != nil {
 			return fmt.Errorf("fetch repo: %w", err)
 		}
 	}
@@ -142,24 +145,35 @@ func run() error {
 				return
 			}
 			<-ticker
-			if *RepoRemote != "" {
-				if err := fetch(context.Background()); err != nil {
-					slog.Error("updater: fetch failed", "error", err)
-					continue
-				}
-			}
-			switch changed, err := srv.reload(context.Background()); {
-			case err != nil:
-				slog.Error("updater: reload failed", "error", err)
-			case changed:
-				srv.log()
-				srv.precacheStart()
-			}
+			update(srv)
 		}
 	}()
 
 	slog.Info("http: listening", "addr", *Addr)
 	return http.ListenAndServe(*Addr, srv)
+}
+
+// update fetches and rescans, once.
+func update(srv *server) {
+	if *RepoRemote != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+		err := fetch(ctx)
+		cancel()
+		if err != nil {
+			slog.Error("updater: fetch failed", "error", err)
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+	defer cancel()
+
+	switch changed, err := srv.reload(ctx); {
+	case err != nil:
+		slog.Error("updater: reload failed", "error", err)
+	case changed:
+		srv.log()
+		srv.precacheStart()
+	}
 }
 
 // fetch updates the local branch from the remote.
@@ -187,6 +201,10 @@ const (
 	stampPad    = "00010101000000"
 
 	rawParam = "__raw" // serve the stored page as a download
+
+	// updateTimeout bounds one fetch and rescan. Without it a hung fetch stalls
+	// every later one, since they run one after another.
+	updateTimeout = time.Minute * 10
 )
 
 type version struct {
@@ -199,8 +217,12 @@ type version struct {
 // any of the work is done. The binary's own hash is mixed in (the pages embed
 // this program's css and markup), along with the settings which affect what it
 // renders (see [httpx.AddExeExtra] in run).
-func (s *server) etag(parts ...string) httpx.ETag {
-	return httpx.NewETag().MixExe().Mix(parts...).ETag().
+func (s *view) etag(parts ...string) httpx.ETag {
+	// the whole history is part of every page (the seekbar, the arrows, the
+	// json island), so the tip is mixed in, not just the version being viewed
+	return httpx.NewETag().MixExe().
+		Mix(s.tip, strconv.Itoa(len(s.versions))).
+		Mix(parts...).ETag().
 		Weaken() // weak: built from the render inputs, not the response bytes
 }
 
@@ -242,18 +264,38 @@ type server struct {
 
 	static http.Handler // the font, from the website's asset pipeline
 
-	seen    atomic.Int64 // when the last request was served, for the precache
+	seen    atomic.Int64 // when the last request finished, for the precache
 	preMu   sync.Mutex
 	preStop context.CancelFunc
+	preDone chan struct{} // closed when the sweep preStop cancels has returned
 
-	mu       sync.RWMutex   // held for the duration of a request, so the
-	versions []version      // history a response is rendered from can't change
-	index    map[string]int // under it (commit hash -> version index)
+	mu       sync.RWMutex   // guards the scanned history, which reload
+	tip      string         // replaces wholesale: the branch tip, the versions
+	versions []version      // in display order, and commit hash -> version
+	index    map[string]int // index
 
 	trees   memo[string, map[string]string] // rev -> sha1(url) -> filename
 	entries memo[string, []entry]           // rev -> cache entries, sorted by url
 	urls    memo[string, map[string]string] // rev -> url -> filename
 	hist    memo[string, []change]          // pathspec -> versions at which an entry changed
+}
+
+// view is one request's read of the history. The scanned history is immutable
+// once published, so a request takes a reference to it instead of holding a
+// lock: a slow client can't block reload, and reload can't change the history
+// out from under a half-rendered response.
+type view struct {
+	*server
+	tip      string
+	versions []version
+	index    map[string]int
+}
+
+// snapshot takes a view of the history as it is now.
+func (s *server) snapshot() *view {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return &view{server: s, tip: s.tip, versions: s.versions, index: s.index}
 }
 
 type entry struct {
@@ -288,6 +330,10 @@ const (
 // scraper parses.
 const mainID = "block-mainpagecontent"
 
+// memoCommits is how many commits the per-commit memos keep. Walking a page's
+// seekbar visits every version, and each one's tree and entry list is ~150KB.
+const memoCommits = 64
+
 func newServer(ctx context.Context, repo, rev string) (*server, error) {
 	s := &server{
 		repo:   repo,
@@ -295,6 +341,7 @@ func newServer(ctx context.Context, repo, rev string) (*server, error) {
 		limit:  rate.NewLimiter(rate.Limit(*GitRate), *GitBurst),
 		static: static.Handler(static.Webarchive),
 	}
+	s.trees.max, s.entries.max, s.urls.max = memoCommits, memoCommits, memoCommits
 	if _, err := s.reload(ctx); err != nil {
 		return nil, err
 	}
@@ -325,6 +372,7 @@ func (s *server) reload(ctx context.Context) (bool, error) {
 	if len(versions) == 0 {
 		return false, fmt.Errorf("no commits in %s", s.repo)
 	}
+	tip := versions[len(versions)-1].Hash // in rev-list order, before sorting
 
 	// urls address versions by time, so order by it (commit order is only
 	// almost chronological) and stamp them, disambiguating shared seconds
@@ -351,10 +399,10 @@ func (s *server) reload(ctx context.Context) (bool, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(versions) == len(s.versions) && versions[len(versions)-1].Hash == s.versions[len(s.versions)-1].Hash {
+	if tip == s.tip && len(versions) == len(s.versions) {
 		return false, nil // nothing new
 	}
-	s.versions, s.index = versions, index
+	s.tip, s.versions, s.index = tip, versions, index
 	s.hist.clear() // version indexes are baked into these; the rest is by commit
 	return true, nil
 }
@@ -366,15 +414,24 @@ func (s *server) precacheStart() {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 
 	s.preMu.Lock()
-	if s.preStop != nil {
-		s.preStop()
-	}
-	s.preStop = cancel
+	stop, stopped := s.preStop, s.preDone
+	s.preStop, s.preDone = cancel, done
 	s.preMu.Unlock()
 
-	go s.precache(ctx)
+	go func() {
+		defer cancel()
+		defer close(done)
+		if stop != nil {
+			// the sweep this one replaces precomputed against an older history,
+			// and its git processes are quota this one needs
+			stop()
+			<-stopped
+		}
+		s.precache(ctx)
+	}()
 }
 
 // precache computes what the first visit to each page would otherwise pay for,
@@ -383,9 +440,8 @@ func (s *server) precache(ctx context.Context) {
 	const idle = time.Second * 2
 
 	start := time.Now()
-	s.mu.RLock()
-	hash := s.versions[len(s.versions)-1].Hash
-	s.mu.RUnlock()
+	v := s.snapshot()
+	hash := v.versions[len(v.versions)-1].Hash
 
 	// the entry list comes first: every page's sidebar needs it
 	if err := s.precacheIdle(ctx, idle); err != nil {
@@ -407,10 +463,7 @@ func (s *server) precache(ctx context.Context) {
 		}
 		sum := sha1.Sum([]byte(e.URL))
 
-		s.mu.RLock()
-		_, err := s.history(ctx, histSpec(e.Name, hex.EncodeToString(sum[:])))
-		s.mu.RUnlock()
-
+		_, err := v.history(ctx, histSpec(e.Name, hex.EncodeToString(sum[:])))
 		if err != nil {
 			slog.Debug("precache: read history", "entry", e.Name, "error", err)
 			continue
@@ -446,13 +499,20 @@ func (s *server) log() {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// stamped at both ends: the precache waits for a lull in what is being
+	// served, and a long request is a lull only once it's done
 	s.seen.Store(time.Now().UnixNano())
+	defer func() { s.seen.Store(time.Now().UnixNano()) }()
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.snapshot().serve(w, r)
+}
 
-	if r.Method == http.MethodConnect {
-		http.Error(w, "ottrec-webarchive: https tunnelling is not supported; use it as an origin server instead", http.StatusNotImplemented)
+func (s *view) serve(w http.ResponseWriter, r *http.Request) {
+	// neither form of proxying works: a page renders with links, fonts and
+	// fetches pointed at the proxy's own origin, which for a proxy client is
+	// the archived site
+	if r.Method == http.MethodConnect || r.URL.IsAbs() {
+		http.Error(w, "ottrec-webarchive: proxying is not supported; use it as an origin server instead", http.StatusNotImplemented)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, static.Base) {
@@ -464,15 +524,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	latest := len(s.versions) - 1
-
-	// an absolute-form request (a real proxy client) has nowhere to put a
-	// timestamp, so it always gets the latest version
-	if r.URL.IsAbs() {
-		u := *r.URL
-		u.Scheme, u.Fragment, u.RawFragment = "https", "", ""
-		s.serveCached(w, r, latest, false, &u)
-		return
-	}
 
 	// browsers and crawlers ask for these on their own; without this they look
 	// like a host ("favicon.ico" has a dot in it) and cost a redirect and a
@@ -508,6 +559,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !isHost(hu) {
 		hu, p = *Host, rest // no host in the path: the default one
 	}
+	hu = strings.ToLower(hu) // canonical: everything downstream compares it
 	query, raw := r.URL.RawQuery, false
 	if q := r.URL.Query(); q.Has(rawParam) {
 		q.Del(rawParam)
@@ -526,7 +578,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // canonical redirects to the canonical url of a page, or runs fn if this is it.
-func (s *server) canonical(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL, fn func()) {
+func (s *view) canonical(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL, fn func()) {
 	if want := s.pageURL(cur, dated, u); want != r.URL.RequestURI() {
 		w.Header().Set("Cache-Control", "no-store")
 		http.Redirect(w, r, want, http.StatusFound)
@@ -538,7 +590,7 @@ func (s *server) canonical(w http.ResponseWriter, r *http.Request, cur int, date
 // parseStamp resolves a url timestamp to the first version at or after it,
 // clamped to the last one. A ".VV" suffix picks between versions which share a
 // second.
-func (s *server) parseStamp(seg string) (int, bool) {
+func (s *view) parseStamp(seg string) (int, bool) {
 	stamp, sub, hasSub := strings.Cut(seg, ".")
 	if l := len(stamp); l < 4 || l > len(stampFormat) || l%2 != 0 || strings.Trim(stamp, "0123456789") != "" {
 		return 0, false
@@ -568,7 +620,7 @@ func (s *server) parseStamp(seg string) (int, bool) {
 // pageURL is the canonical proxy url of a page: always qualified with the
 // scraped host, and with a version timestamp once one has been picked (an
 // undated url follows the latest version).
-func (s *server) pageURL(i int, dated bool, u *url.URL) string {
+func (s *view) pageURL(i int, dated bool, u *url.URL) string {
 	var prefix string
 	if dated {
 		prefix = "/" + s.versions[i].Stamp
@@ -591,7 +643,7 @@ func targetURL(host, escapedPath, rawQuery string) (*url.URL, error) {
 
 // linkPrefix is what a page's own links are prefixed with, so following one
 // stays at the version being viewed.
-func (s *server) linkPrefix(cur int, dated bool) string {
+func (s *view) linkPrefix(cur int, dated bool) string {
 	if !dated {
 		return ""
 	}
@@ -604,7 +656,7 @@ func isHost(seg string) bool {
 	return strings.Contains(seg, ".")
 }
 
-func (s *server) serveCached(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL) {
+func (s *view) serveCached(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL) {
 	var (
 		ctx  = r.Context()
 		hash = sha1.Sum([]byte(u.String()))
@@ -655,13 +707,31 @@ func (s *server) serveCached(w http.ResponseWriter, r *http.Request, cur int, da
 	}
 
 	h := w.Header()
-	for _, k := range []string{"Content-Type", "Content-Language", "Date", "Last-Modified"} {
+	for _, k := range []string{"Content-Type", "Content-Language", "Last-Modified"} {
 		if v := resp.Header.Get(k); v != "" {
 			h.Set(k, v)
 		}
 	}
+	// the stored Date is a year in the past: it describes the scrape, not this
+	// response, and net/http sets a real one
+	if v := resp.Header.Get("Date"); v != "" {
+		h.Set("X-Archived-Date", v)
+	}
 	h.Set("X-Ottrec-Webarchive-Entry", name)
 	h.Set("X-Ottrec-Webarchive-Version", s.versions[cur].Hash)
+
+	// a cached redirect replays as one, pointed back at the proxy at this
+	// version; if the target can't be (offsite, or there isn't one), the stored
+	// body is shown instead, with the archived status in a header
+	code := cmp.Or(resp.StatusCode, http.StatusOK)
+	if code >= 300 && code < 400 {
+		if loc, ok := rewriteURL(resp.Header.Get("Location"), u.Host, s.linkPrefix(cur, dated)); ok && loc != "" {
+			h.Set("Location", loc)
+		} else {
+			h.Set("X-Ottrec-Webarchive-Status", strconv.Itoa(code))
+			code = http.StatusOK
+		}
+	}
 
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
 		if clean, err := sanitize(body, u.Host, s.linkPrefix(cur, dated)); err != nil {
@@ -677,7 +747,7 @@ func (s *server) serveCached(w http.ResponseWriter, r *http.Request, cur int, da
 	}
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 
-	w.WriteHeader(cmp.Or(resp.StatusCode, http.StatusOK))
+	w.WriteHeader(code)
 	if r.Method != http.MethodHead {
 		w.Write(body)
 	}
@@ -717,28 +787,29 @@ func pickVariant(vs []*url.URL) *url.URL {
 }
 
 // variantList is the "did you mean" list for the not found page.
-func (s *server) variantList(cur int, dated bool, vs []*url.URL) string {
+func (s *view) variantList(cur int, dated bool, vs []*url.URL) string {
 	if len(vs) == 0 {
 		return ""
 	}
-	const max = 30
+	const limit = 30
 
 	var b strings.Builder
 	fmt.Fprintf(&b, `<p style="font:14px/1.5 Roboto,system-ui,sans-serif;color:#6F6E69;margin:2rem 2rem 0">`+
 		`cached with other query params (%d):</p><ul style="font:14px/1.6 Roboto,system-ui,sans-serif;margin:.4rem 2rem">`, len(vs))
-	for _, v := range vs[:min(len(vs), max)] {
+	for _, v := range vs[:min(len(vs), limit)] {
 		fmt.Fprintf(&b, `<li><a href="%s" rel="nofollow">?%s</a></li>`,
 			htmlpkg.EscapeString(s.pageURL(cur, dated, v)), htmlpkg.EscapeString(v.RawQuery))
 	}
-	if len(vs) > max {
-		fmt.Fprintf(&b, `<li style="color:#6F6E69">and %d more</li>`, len(vs)-max)
+	if len(vs) > limit {
+		fmt.Fprintf(&b, `<li style="color:#6F6E69">and %d more</li>`, len(vs)-limit)
 	}
 	b.WriteString(`</ul>`)
 	return b.String()
 }
 
-// serveRaw hands over the stored response untouched.
-func (s *server) serveRaw(w http.ResponseWriter, r *http.Request, cur int, u *url.URL) {
+// serveRaw hands over the stored response as a download: the body as it was
+// scraped (gunzipped), without the overlay, but with the proxy's own headers.
+func (s *view) serveRaw(w http.ResponseWriter, r *http.Request, cur int, u *url.URL) {
 	ctx := r.Context()
 	hash := sha1.Sum([]byte(u.String()))
 
@@ -748,37 +819,22 @@ func (s *server) serveRaw(w http.ResponseWriter, r *http.Request, cur int, u *ur
 
 	name, err := s.resolve(ctx, cur, hex.EncodeToString(hash[:]), u)
 	if err != nil {
-		if code := status(err); code == http.StatusServiceUnavailable {
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "ottrec-webarchive: "+err.Error(), code)
-		} else {
-			http.Error(w, "ottrec-webarchive: "+err.Error(), code)
-		}
+		httpError(w, err.Error(), status(err))
 		return
 	}
 	if name == "" {
-		http.Error(w, "ottrec-webarchive: not cached at this version: "+u.String(), http.StatusNotFound)
+		httpError(w, "not cached at this version: "+u.String(), http.StatusNotFound)
 		return
 	}
 
 	buf, err := s.cat(ctx, s.versions[cur].Hash, name)
 	if err != nil {
-		if code := status(err); code == http.StatusServiceUnavailable {
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "ottrec-webarchive: "+err.Error(), code)
-		} else {
-			http.Error(w, "ottrec-webarchive: "+err.Error(), code)
-		}
+		httpError(w, err.Error(), status(err))
 		return
 	}
 	_, resp, body, err := parseEntry(buf)
 	if err != nil {
-		if code := status(err); code == http.StatusServiceUnavailable {
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "ottrec-webarchive: "+err.Error(), code)
-		} else {
-			http.Error(w, "ottrec-webarchive: "+err.Error(), code)
-		}
+		httpError(w, err.Error(), status(err))
 		return
 	}
 
@@ -816,11 +872,10 @@ func rawName(u *url.URL, stamp string, resp *http.Response) string {
 	return base + "-" + stamp + ext
 }
 
-func (s *server) serveError(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL, spec string, status int, msg string, extra ...string) {
+func (s *view) serveError(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL, spec string, status int, msg string, extra ...string) {
 	if status == http.StatusServiceUnavailable {
 		// rendering the full page needs git too, which is the thing we're out of
-		w.Header().Set("Retry-After", "5")
-		http.Error(w, "ottrec-webarchive: "+msg, status)
+		httpError(w, msg, status)
 		return
 	}
 
@@ -840,7 +895,7 @@ func (s *server) serveError(w http.ResponseWriter, r *http.Request, cur int, dat
 	}
 }
 
-func (s *server) serveIndex(w http.ResponseWriter, r *http.Request, cur int, dated bool) {
+func (s *view) serveIndex(w http.ResponseWriter, r *http.Request, cur int, dated bool) {
 	ctx := r.Context()
 
 	if notModified(w, r, s.etag("index", s.versions[cur].Hash, strconv.FormatBool(dated))) {
@@ -909,7 +964,7 @@ func parseEntry(buf []byte) (*http.Request, *http.Response, []byte, error) {
 }
 
 // startTag renders the start tag of an element for the comment which replaces
-// it, with any "-->" escaped so it can't end the comment early.
+// it. Escaping is the renderer's job: it escapes comment data on the way out.
 func startTag(n *html.Node) string {
 	var b strings.Builder
 	b.WriteString("<")
@@ -926,7 +981,7 @@ func startTag(n *html.Node) string {
 		}
 	}
 	b.WriteString(">")
-	return strings.ReplaceAll(b.String(), "-->", "--&gt;")
+	return b.String()
 }
 
 // retitle wraps the page title, falling back to middle if the page has none.
@@ -1020,7 +1075,7 @@ var urlAttrs = map[string]bool{
 // remaining urls to point back at the proxy, so the CSP is a second line of
 // defense rather than the only one.
 func sanitize(body []byte, host, prefix string) ([]byte, error) {
-	doc, err := html.Parse(bytes.NewReader(body))
+	doc, err := html.Parse(bytes.NewReader(body)) // utf-8 is assumed, as ottawa.ca is
 	if err != nil {
 		return nil, err
 	}
@@ -1070,6 +1125,10 @@ func sanitizeAttrs(n *html.Node, host, prefix string) {
 			if strings.Contains(strings.ToLower(a.Val), "url(") {
 				n.Attr[i] = origAttr(a)
 			}
+		case key == "src" && n.DataAtom == atom.Img:
+			// nothing but data: images can load, so an image url would only be
+			// a request the csp blocks; the alt text is what's left
+			n.Attr[i] = origAttr(a)
 		case urlAttrs[key]:
 			// offsite (or javascript:) urls keep their value, but not their
 			// meaning: the link text stays readable and nothing is clickable
@@ -1092,7 +1151,7 @@ func origAttr(a html.Attribute) html.Attribute {
 }
 
 // entryHref links to a cache entry through the proxy.
-func (s *server) entryHref(e entry, cur int, dated bool) string {
+func (s *view) entryHref(e entry, cur int, dated bool) string {
 	u, err := url.Parse(e.URL)
 	if err != nil {
 		return "/"
@@ -1122,7 +1181,18 @@ func entryLabel(e entry) string {
 	return entryPath(e)
 }
 
-// entryHead is the stored request and response headers, verbatim.
+// secretHead are headers whose value isn't shown. The scraper doesn't send
+// anything secret at a public site, but this is on every archived page.
+var secretHead = map[string]bool{
+	"authorization":       true,
+	"cookie":              true,
+	"proxy-authorization": true,
+	"set-cookie":          true,
+	"x-scraper-secret":    true,
+}
+
+// entryHead is the stored request and response headers, with the credentials
+// among them redacted.
 func entryHead(buf []byte) string {
 	var head []byte
 	for range 2 {
@@ -1130,8 +1200,15 @@ func entryHead(buf []byte) string {
 		if i < 0 {
 			break
 		}
-		head = append(head, bytes.TrimRight(buf[:i], "\r\n")...)
-		head = append(head, "\n\n"...)
+		for line := range bytes.Lines(bytes.TrimRight(buf[:i], "\r\n")) {
+			line = bytes.TrimRight(line, "\r\n")
+			if name, _, ok := bytes.Cut(line, []byte(":")); ok && secretHead[strings.ToLower(string(name))] {
+				line = append(slices.Clone(name), ": (redacted)"...)
+			}
+			head = append(head, line...)
+			head = append(head, '\n')
+		}
+		head = append(head, '\n')
 		buf = buf[i+4:]
 	}
 	return strings.TrimSpace(string(head))
@@ -1166,6 +1243,7 @@ func pageTitle(body []byte) string {
 // relative, and anything which would leave the proxy or run something is
 // rejected.
 func rewriteURL(v, host, prefix string) (string, bool) {
+	host = strings.ToLower(host)
 	s := strings.TrimSpace(v)
 	if s == "" || strings.HasPrefix(s, "#") {
 		return v, true
@@ -1189,10 +1267,13 @@ func rewriteURL(v, host, prefix string) (string, bool) {
 			return "", false
 		}
 		u.Scheme, u.User = "", nil
-		if u.Path == "" {
-			u.Path = "/"
+		// the escaping is kept: re-escaping the decoded path would turn
+		// "/a%2Fb" into "/a/b", which is a different resource
+		path, escaped := u.Path, u.EscapedPath()
+		if path == "" {
+			path, escaped = "/", "/"
 		}
-		u.Path, u.RawPath = prefix+"/"+host+u.Path, ""
+		u.Path, u.RawPath = prefix+"/"+host+path, prefix+"/"+host+escaped
 		u.Host = ""
 		return u.String(), true
 	}
@@ -1201,7 +1282,7 @@ func rewriteURL(v, host, prefix string) (string, bool) {
 
 // inject adds the version selector overlay and the CSP which keeps the page
 // from reaching anything real, and sets the response headers it needs.
-func (s *server) inject(ctx context.Context, h http.Header, body []byte, r *http.Request, cur int, dated bool, u *url.URL, spec, head string) []byte {
+func (s *view) inject(ctx context.Context, h http.Header, body []byte, r *http.Request, cur int, dated bool, u *url.URL, spec, head string) []byte {
 	var changes []change
 	if spec != "" {
 		var err error
@@ -1297,7 +1378,7 @@ func (s *server) inject(ctx context.Context, h http.Header, body []byte, r *http
 // than fit. Every bar is a plain link, so it works without javascript;
 // javascript only relabels the status line while hovering and scrolls the
 // current version into view.
-func (s *server) overlay(nonce string, cur int, changes []change, dated bool, u *url.URL, pages []entry) string {
+func (s *view) overlay(nonce string, cur int, changes []change, dated bool, u *url.URL, pages []entry) string {
 	data := struct {
 		V       []string `json:"v"`
 		Changes []change `json:"c"`
@@ -1385,8 +1466,10 @@ func (s *server) overlay(nonce string, cur int, changes []change, dated bool, u 
 
 	b.WriteString(`<div id="__cpw"><div id="__cpt" role="group" aria-label="cache version">`)
 	for i := range s.versions {
+		c, ok := byVersion[i]
+
 		var h int
-		switch c, ok := byVersion[i]; {
+		switch {
 		case len(changes) == 0:
 			h = 35 // no per-page history (the cache index), so just show the versions
 		case !ok, c.Tier == tierGone:
@@ -1395,7 +1478,7 @@ func (s *server) overlay(nonce string, cur int, changes []change, dated bool, u 
 			h = barHeight(c.Added+c.Deleted, maxLines)
 		}
 		class := "__cpb"
-		if c, ok := byVersion[i]; ok && c.Tier > tierGone {
+		if ok && c.Tier > tierGone {
 			class += fmt.Sprintf(" __cpb-t%d", c.Tier)
 		}
 		if i == cur {
@@ -1427,7 +1510,7 @@ func (s *server) overlay(nonce string, cur int, changes []change, dated bool, u 
 	}
 	fmt.Fprintf(&b, `<a class="__cpn" href="%s" rel="nofollow" title="%s">&lsaquo;</a>`,
 		htmlpkg.EscapeString(s.pageURL(seekStep(changes, cur, -1, len(s.versions)), true, u)), older)
-	date, change := statusLine(s.versions, cur, changes, cur)
+	date, change := statusLine(s.versions, changes, cur)
 	fmt.Fprintf(&b, `<p id="__cps"><span id="__cpsd">%s</span><span id="__cpsc">%s</span></p>`,
 		htmlpkg.EscapeString(date), htmlpkg.EscapeString(change))
 	if len(changes) > 0 {
@@ -1469,11 +1552,11 @@ type monthLabel struct {
 // barHeight scales a change to a bar height. The scale is logarithmic: a page
 // rewrite is two orders of magnitude bigger than the daily churn, so a linear
 // scale flattens everything but the outliers into stubs.
-func barHeight(lines, max int) int {
-	if lines <= 0 || max <= 0 {
+func barHeight(lines, peak int) int {
+	if lines <= 0 || peak <= 0 {
 		return 8
 	}
-	return 8 + int(92*math.Log1p(float64(lines))/math.Log1p(float64(max)))
+	return 8 + int(92*math.Log1p(float64(lines))/math.Log1p(float64(peak)))
 }
 
 // seekStep is the next version in the given direction which visibly changed, so
@@ -1497,7 +1580,7 @@ func seekStep(changes []change, cur, dir, n int) int {
 }
 
 // statusLine describes version i, relative to the currently loaded one.
-func statusLine(versions []version, cur int, changes []change, i int) (string, string) {
+func statusLine(versions []version, changes []change, i int) (string, string) {
 	date := versions[i].Time.In(ottrecidx.TZ).Format("Mon 2006-01-02 15:04")
 
 	var b strings.Builder
@@ -1767,15 +1850,18 @@ try{
 // progressive enhancement
 const overlayJS = `
 (()=>{
- const $=s=>document.querySelector(s)
+ // the overlay is the last thing in the body, and an archived page is free to
+ // define the same ids, so it is found by taking the last match and everything
+ // else is looked up within it
+ let root=null
+ const q=s=>root?root.querySelector(s):null
  let data=null
 
  const fit=()=>{
-  const root=$('#__cp')
   if(root)document.documentElement.style.setProperty('--cp-h',root.offsetHeight+'px')
  }
  const fade=()=>{
-  const w=$('#__cpw')
+  const w=q('#__cpw')
   if(!w)return
   w.classList.toggle('__cpw-l',w.scrollLeft>2)
   w.classList.toggle('__cpw-r',w.scrollLeft+w.clientWidth<w.scrollWidth-2)
@@ -1789,7 +1875,7 @@ const overlayJS = `
  }
  const applyUnchanged=show=>{
   document.documentElement.toggleAttribute('data-cp-show',show)
-  const el=$('#__cpx')
+  const el=q('#__cpx')
   if(el)el.checked=show
  }
  const savedTheme=()=>{
@@ -1801,7 +1887,7 @@ const overlayJS = `
  }
  const applyTheme=t=>{
   document.documentElement.style.colorScheme=t==='auto'?'light dark':t
-  const el=$('#__cpth')
+  const el=q('#__cpth')
   if(el){
    el.dataset.theme=t
    el.setAttribute('aria-label','Color scheme: '+t)
@@ -1824,13 +1910,21 @@ const overlayJS = `
   return [data.v[i],s]
  }
 
+ // edge auto-scroll state, outside bind so a body swap can stop a frame which
+ // is still running: the element it scrolls is gone, and its pointerleave
+ // never fires
+ let vel=0,raf=0
+
  // bind wires up the overlay; it runs again after each client-side navigation,
  // since the whole body (overlay included) is swapped out
  const bind=at=>{
-  const root=$('#__cp'), island=$('#__cpd')
+  if(raf)cancelAnimationFrame(raf)
+  vel=raf=0
+  root=[...document.querySelectorAll('#__cp')].pop()||null
+  const island=q('#__cpd')
   if(!root||!island)return
   data=JSON.parse(island.textContent)
-  const date=$('#__cpsd'), change=$('#__cpsc'), strip=$('#__cpt'), wrap=$('#__cpw')
+  const date=q('#__cpsd'), change=q('#__cpsc'), strip=q('#__cpt'), wrap=q('#__cpw')
   if(!date||!change||!strip||!wrap)return
 
   // firefox has no user-drag, so dragging a bar or a page link would start a
@@ -1860,7 +1954,6 @@ const overlayJS = `
   // pointing at either end of the strip scrolls it, so seeking a year back
   // doesn't need the scrollbar
   if(matchMedia('(pointer:fine)').matches){
-   let vel=0,raf=0
    const tick=()=>{
     if(!vel){raf=0;return}
     wrap.scrollLeft+=vel
@@ -1876,7 +1969,7 @@ const overlayJS = `
   }
 
   // modelled on the website's navbar toggle: light -> dark -> follow the os
-  const theme=$('#__cpth')
+  const theme=q('#__cpth')
   if(theme){
    theme.addEventListener('click',()=>{
     const next=({auto:'light',light:'dark',dark:'auto'})[savedTheme()]
@@ -1887,7 +1980,7 @@ const overlayJS = `
    applyTheme(savedTheme())
   }
 
-  const filter=$('#__cpx')
+  const filter=q('#__cpx')
   if(filter){
    filter.checked=showsUnchanged()
    filter.addEventListener('change',()=>{
@@ -1912,10 +2005,16 @@ const overlayJS = `
   return best
  }
 
+ // the page which is currently rendered: popstate fires after location has
+ // already changed, so the outgoing one can't be read back off the url
+ let here=location.pathname
+ // a version switch stays on the same page: only the timestamp segment changes
+ const page=p=>p.replace(/^\/\d{4,14}(\.\d+)?(?=\/)/,'')
+
  let ctl=null
  const fail=(url,err)=>{
   console.error('ottrec-webarchive: load '+url+':',err)
-  const date=$('#__cpsd'), change=$('#__cpsc')
+  const date=q('#__cpsd'), change=q('#__cpsc')
   if(!date)return
   const was=[date.textContent,change?change.textContent:'']
   date.textContent='load failed: '+((err&&err.message)||err||'unknown')
@@ -1932,29 +2031,33 @@ const overlayJS = `
   const url=new URL(href,location.href)
   ctl?.abort() // a newer click supersedes whatever is still in flight
   const c=ctl=new AbortController()
-  const root=$('#__cp'), wrap=$('#__cpw'), side=$('#__cpsb')
-  const at=wrap?wrap.scrollLeft:null, top=side?side.scrollTop:0
-  // a version switch stays on the same page (only the timestamp segment
-  // changes), so keep the reading position
-  const page=p=>p.replace(/^\/\d{4,14}(\.\d+)?(?=\/)/,'')
-  const keep=page(url.pathname)===page(location.pathname)?anchor():null
+  const wrap=q('#__cpw'), side=q('#__cpsb')
+  // the reading position and the seekbar scroll are only worth keeping across
+  // a version switch; a different page re-centers on the version being viewed
+  const same=page(url.pathname)===page(here)
+  const at=same&&wrap?wrap.scrollLeft:null, top=side?side.scrollTop:0
+  const keep=same?anchor():null
   document.documentElement.dataset.cpBusy='1'
   try{
    const res=await fetch(url,{credentials:'same-origin',signal:c.signal})
    if(!(res.headers.get('content-type')||'').includes('text/html')){
-    location.href=url.href // not a page: let the browser deal with it
+    c.abort() // not a page: let the browser deal with it, and only once
+    location.href=url.href
     return
    }
    const doc=new DOMParser().parseFromString(await res.text(),'text/html')
    if(!pop)history.pushState(null,'',res.url||url)
    document.title=doc.title
+   const was=document.querySelector('link[rel="canonical"]'), now=doc.querySelector('link[rel="canonical"]')
+   if(was)was.remove()
+   if(now)document.head.appendChild(document.importNode(now,true))
    document.body.replaceWith(doc.body)
    try{
     bind(at)
    }catch(err){
     console.error('ottrec-webarchive: bind:',err) // the page is still usable unbound
    }
-   const sb=$('#__cpsb')
+   const sb=q('#__cpsb')
    if(sb)sb.scrollTop=top
    const el=keep&&document.getElementById(keep.id)
    scrollTo(0,el?Math.max(0,scrollY+el.getBoundingClientRect().top-keep.top):0)
@@ -1962,6 +2065,7 @@ const overlayJS = `
    if(c.signal.aborted)return
    fail(url.href,err)
   }finally{
+   here=location.pathname
    if(ctl===c)ctl=null
    if(!ctl)delete document.documentElement.dataset.cpBusy
   }
@@ -1979,13 +2083,13 @@ const overlayJS = `
  })
  // the drawer's scrim is only a shadow, so closing it needs a hand
  addEventListener('click',e=>{
-  const menu=$('#__cpm')
+  const menu=q('#__cpm')
   if(!menu||!menu.checked||!(e.target instanceof Element))return
   if(e.target.closest('#__cpsb,#__cpmb,label[for="__cpm"]'))return
   menu.checked=false
  })
  addEventListener('keydown',e=>{
-  const menu=$('#__cpm')
+  const menu=q('#__cpm')
   if(e.key==='Escape'&&menu&&menu.checked)menu.checked=false
  })
  addEventListener('storage',e=>{
@@ -1994,7 +2098,11 @@ const overlayJS = `
  })
  addEventListener('popstate',()=>go(location.href,true))
  addEventListener('resize',()=>{fit();fade()})
- bind(null)
+ try{
+  bind(null)
+ }catch(err){
+  console.error('ottrec-webarchive: bind:',err) // the page is still usable unbound
+ }
 })()
 `
 
@@ -2012,6 +2120,15 @@ func (s *server) wait(ctx context.Context) error {
 		return fmt.Errorf("%w: waited %s for git quota: %w", errBusy, *GitWait, err)
 	}
 	return nil
+}
+
+// httpError writes a plain error response, asking for a retry when the thing
+// which failed was git quota.
+func httpError(w http.ResponseWriter, msg string, code int) {
+	if code == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "5")
+	}
+	http.Error(w, "ottrec-webarchive: "+msg, code)
 }
 
 // status is the response status for an error.
@@ -2047,16 +2164,19 @@ func gitExec(ctx context.Context, dir string, arg ...string) ([]byte, error) {
 
 // tree indexes the cache entries of a commit by the sha1 of their url.
 func (s *server) tree(ctx context.Context, hash string) (map[string]string, error) {
-	return s.trees.get(hash, func(hash string) (map[string]string, error) {
+	return s.trees.get(ctx, hash, func(hash string) (map[string]string, error) {
 		buf, err := s.git(ctx, "ls-tree", "-r", "--name-only", "--end-of-options", hash)
 		if err != nil {
 			return nil, err
 		}
 		m := map[string]string{}
 		for line := range strings.Lines(string(buf)) {
+			// `<category>-<sha1(url)>`, and the category has had a hyphen in it
 			name := strings.TrimSpace(line)
-			if _, key, ok := strings.Cut(name, "-"); ok && len(key) == hex.EncodedLen(sha1.Size) {
-				m[key] = name
+			if i := strings.LastIndexByte(name, '-'); i >= 0 {
+				if key := name[i+1:]; len(key) == hex.EncodedLen(sha1.Size) {
+					m[key] = name
+				}
 			}
 		}
 		return m, nil
@@ -2065,7 +2185,7 @@ func (s *server) tree(ctx context.Context, hash string) (map[string]string, erro
 
 // list gets the cached urls of a commit, sorted.
 func (s *server) list(ctx context.Context, hash string) ([]entry, error) {
-	return s.entries.get(hash, func(hash string) ([]entry, error) {
+	return s.entries.get(ctx, hash, func(hash string) ([]entry, error) {
 		tree, err := s.tree(ctx, hash)
 		if err != nil {
 			return nil, err
@@ -2077,21 +2197,20 @@ func (s *server) list(ctx context.Context, hash string) ([]entry, error) {
 			specs[i] = hash + ":" + name
 		}
 
-		bufs, err := s.catBatch(ctx, specs)
-		if err != nil {
-			return nil, err
-		}
 		es := make([]entry, 0, len(names))
-		for i, buf := range bufs {
+		if err := s.catEach(ctx, specs, func(i int, buf []byte) error {
 			req, resp, body, err := parseEntry(buf)
 			if err != nil {
-				continue
+				return nil // missing, or not a stored response
 			}
 			e := entry{Name: names[i], URL: req.URL.String()}
 			if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
 				e.HTML, e.Title = true, pageTitle(body)
 			}
 			es = append(es, e)
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		slices.SortFunc(es, func(a, b entry) int { return cmp.Compare(a.URL, b.URL) })
 		return es, nil
@@ -2111,24 +2230,33 @@ func histSpec(name, key string) string {
 
 // history gets the versions at which a cache entry changed, ascending, with the
 // size of each change (used for the seekbar bar heights).
-func (s *server) history(ctx context.Context, spec string) ([]change, error) {
-	return s.hist.get(spec, func(spec string) ([]change, error) {
+func (s *view) history(ctx context.Context, spec string) ([]change, error) {
+	// version indexes are baked into the result, so the tip is part of the key:
+	// a request still rendering against an older history can't poison it
+	return s.hist.get(ctx, s.tip+" "+spec, func(string) ([]change, error) {
+		// walked from the branch tip, not the newest version: the display order
+		// is by commit date, and log can only walk back from where it starts
 		buf, err := s.git(ctx, "log", "--first-parent", "--no-renames", "--format=%x00%H", "--numstat",
-			"--end-of-options", s.versions[len(s.versions)-1].Hash, "--", spec)
+			"--end-of-options", s.tip, "--", spec)
 		if err != nil {
 			return nil, err
 		}
-		var cs []change
+		var (
+			cs   []change
+			skip bool // a commit which isn't part of the history being served
+		)
 		for line := range strings.Lines(string(buf)) {
 			line = strings.TrimRight(line, "\n")
 			if hash, ok := strings.CutPrefix(line, "\x00"); ok {
-				if i, ok := s.index[hash]; ok {
+				i, known := s.index[hash]
+				skip = !known // and so are the numstat lines which follow it
+				if known {
 					cs = append(cs, change{Version: i})
 				}
 				continue
 			}
 			// `<added>\t<deleted>\t<path>`, or `-` for binary files
-			if len(cs) == 0 || line == "" {
+			if skip || len(cs) == 0 || line == "" {
 				continue
 			}
 			add, rest, ok := strings.Cut(line, "\t")
@@ -2145,10 +2273,15 @@ func (s *server) history(ctx context.Context, spec string) ([]change, error) {
 			}
 			c.name = strings.TrimSpace(name)
 		}
+		// a commit with no numstat line for the entry (a merge) says nothing
+		// about it, and has no blob for classify to read
+		cs = slices.DeleteFunc(cs, func(c change) bool { return c.name == "" })
 		slices.SortFunc(cs, func(a, b change) int { return cmp.Compare(a.Version, b.Version) })
 
+		// an unclassified history isn't worth keeping: every change would read
+		// as "no text change", and the default filter would hide all of them
 		if err := s.classify(ctx, cs); err != nil {
-			slog.Warn("classify changes", "spec", spec, "error", err)
+			return nil, fmt.Errorf("classify changes: %w", err)
 		}
 		return cs, nil
 	})
@@ -2156,7 +2289,7 @@ func (s *server) history(ctx context.Context, spec string) ([]change, error) {
 
 // classify fills in the tier of each change by comparing the text of the
 // response with the previous one.
-func (s *server) classify(ctx context.Context, cs []change) error {
+func (s *view) classify(ctx context.Context, cs []change) error {
 	if len(cs) == 0 {
 		return nil
 	}
@@ -2165,25 +2298,18 @@ func (s *server) classify(ctx context.Context, cs []change) error {
 	for i, c := range cs {
 		specs[i] = s.versions[c.Version].Hash + ":" + c.name
 	}
-	bufs, err := s.catBatch(ctx, specs)
-	if err != nil {
-		return err
-	}
 
-	// parsing a few hundred pages, so spread it over the cpus
-	ds := make([]digest, len(bufs))
-	for i, buf := range bufs {
-		if buf == nil {
-			cs[i].Tier = tierGone // the cache was cleared at this version
-		}
-	}
+	// parsing a few hundred pages, so spread it over the cpus; each one is
+	// digested as it is read, so they aren't all in memory at once
+	ds := make([]digest, len(cs))
 	var (
 		wg  sync.WaitGroup
 		sem = make(chan struct{}, runtime.GOMAXPROCS(0))
 	)
-	for i, buf := range bufs {
+	err := s.catEach(ctx, specs, func(i int, buf []byte) error {
 		if buf == nil {
-			continue
+			cs[i].Tier = tierGone // the cache was cleared at this version
+			return nil
 		}
 		wg.Add(1)
 		sem <- struct{}{}
@@ -2192,8 +2318,12 @@ func (s *server) classify(ctx context.Context, cs []change) error {
 			defer func() { <-sem }()
 			ds[i] = digestEntry(buf)
 		}()
-	}
+		return nil
+	})
 	wg.Wait()
+	if err != nil {
+		return err
+	}
 
 	// compare against the last version the entry was actually in, so a scrape
 	// after a cache clear is measured against the content before it
@@ -2344,7 +2474,7 @@ var noText = map[atom.Atom]bool{
 // if it isn't cached there. Entries are normally named after the sha1 of the
 // url, but some old ones were cached under a different url than the one in the
 // stored request, so it falls back to indexing the requests themselves.
-func (s *server) resolve(ctx context.Context, cur int, key string, u *url.URL) (string, error) {
+func (s *view) resolve(ctx context.Context, cur int, key string, u *url.URL) (string, error) {
 	hash := s.versions[cur].Hash
 
 	tree, err := s.tree(ctx, hash)
@@ -2364,7 +2494,7 @@ func (s *server) resolve(ctx context.Context, cur int, key string, u *url.URL) (
 
 // urlIndex indexes the cache entries of a commit by their request url.
 func (s *server) urlIndex(ctx context.Context, hash string) (map[string]string, error) {
-	return s.urls.get(hash, func(hash string) (map[string]string, error) {
+	return s.urls.get(ctx, hash, func(hash string) (map[string]string, error) {
 		es, err := s.list(ctx, hash)
 		if err != nil {
 			return nil, err
@@ -2388,11 +2518,16 @@ func (s *server) cat(ctx context.Context, hash, name string) ([]byte, error) {
 	return buf, nil
 }
 
-// catBatch is like cat, but reads multiple `<commit>:<path>` specs with a single
-// process, returning nil for missing ones.
-func (s *server) catBatch(ctx context.Context, specs []string) ([][]byte, error) {
+// catEach is like cat, but reads multiple `<commit>:<path>` specs with a single
+// process, calling fn with the contents of each in turn (nil for a missing
+// one). Only what fn keeps stays in memory: a commit's entries are ~14MB
+// together, and a page's history ~30MB.
+func (s *server) catEach(ctx context.Context, specs []string, fn func(i int, buf []byte) error) error {
+	if len(specs) == 0 {
+		return nil
+	}
 	if err := s.wait(ctx); err != nil {
-		return nil, err
+		return err
 	}
 
 	var stdin bytes.Buffer
@@ -2410,51 +2545,55 @@ func (s *server) catBatch(ctx context.Context, specs []string) ([][]byte, error)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return err
+	}
+	// leaving early means leaving objects unread, which Wait would block on
+	abort := func(err error) error {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return err
 	}
 
 	// `<oid> <type> <size>\n<contents>\n` or `<input> missing\n`
-	bufs := make([][]byte, 0, len(specs))
+	var n int
 	r := bufio.NewReader(stdout)
-	for range specs {
+	for ; n < len(specs); n++ {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			break
 		}
 		_, rest, ok := strings.Cut(strings.TrimSuffix(line, "\n"), " ") // oid
+		if ok {
+			_, rest, ok = strings.Cut(rest, " ") // type
+		}
 		if !ok {
-			bufs = append(bufs, nil)
+			if err := fn(n, nil); err != nil { // "<input> missing"
+				return abort(err)
+			}
 			continue
 		}
-		_, sizeStr, ok := strings.Cut(rest, " ") // type
-		if !ok {
-			bufs = append(bufs, nil) // "<input> missing"
-			continue
-		}
-		size, err := strconv.ParseInt(sizeStr, 10, 64)
+		size, err := strconv.ParseInt(rest, 10, 64)
 		if err != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-			return nil, fmt.Errorf("parse cat-file header %q: %w", line, err)
+			return abort(fmt.Errorf("parse cat-file header %q: %w", line, err))
 		}
 		buf := make([]byte, size+1) // includes the trailing newline
 		if _, err := io.ReadFull(r, buf); err != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-			return nil, fmt.Errorf("read cat-file contents: %w", err)
+			return abort(fmt.Errorf("read cat-file contents: %w", err))
 		}
-		bufs = append(bufs, buf[:size])
+		if err := fn(n, buf[:size]); err != nil {
+			return abort(err)
+		}
 	}
 	if err := cmd.Wait(); err != nil {
-		return nil, transformError(err, stderr.Bytes())
+		return transformError(err, stderr.Bytes())
 	}
-	if len(bufs) != len(specs) {
-		return nil, fmt.Errorf("read %d of %d objects", len(bufs), len(specs))
+	if n != len(specs) {
+		return fmt.Errorf("read %d of %d objects", n, len(specs))
 	}
-	return bufs, nil
+	return nil
 }
 
 func transformError(err error, stderr []byte) error {
@@ -2474,11 +2613,25 @@ func isLikelyGitHash(hash string) bool {
 	return len(hash) >= 40 && strings.Trim(hash, "0123456789abcdef") == ""
 }
 
-// memo caches expensive lookups for the lifetime of the process (the history is
-// immutable, so nothing needs invalidating).
+// memo caches expensive lookups (what they describe is immutable, so nothing
+// needs invalidating; max bounds how many are kept). The lock is only held
+// around the bookkeeping, never the lookup itself: concurrent callers of
+// different keys don't serialize, and concurrent callers of the same one wait
+// for the first rather than repeating it. Failures aren't cached.
 type memo[K comparable, V any] struct {
-	mu sync.Mutex
-	m  map[K]V
+	max int // most entries to keep, least recently used first out (0 for all)
+
+	mu   sync.Mutex
+	m    map[K]*memoEntry[V]
+	tick int64
+}
+
+// memoEntry is one lookup, in flight or done.
+type memoEntry[V any] struct {
+	done chan struct{} // closed once v and err are set
+	used int64         // when it was last handed out
+	v    V
+	err  error
 }
 
 func (m *memo[K, V]) clear() {
@@ -2487,19 +2640,57 @@ func (m *memo[K, V]) clear() {
 	m.m = nil
 }
 
-func (m *memo[K, V]) get(k K, fn func(K) (V, error)) (V, error) {
+func (m *memo[K, V]) get(ctx context.Context, k K, fn func(K) (V, error)) (V, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if v, ok := m.m[k]; ok {
-		return v, nil
+	m.tick++
+	if e, ok := m.m[k]; ok {
+		e.used = m.tick
+		m.mu.Unlock()
+		select {
+		case <-e.done:
+			return e.v, e.err
+		case <-ctx.Done():
+			var zero V
+			return zero, ctx.Err()
+		}
 	}
-	v, err := fn(k)
-	if err != nil {
-		return v, err
-	}
+	e := &memoEntry[V]{done: make(chan struct{}), used: m.tick}
 	if m.m == nil {
-		m.m = map[K]V{}
+		m.m = map[K]*memoEntry[V]{}
 	}
-	m.m[k] = v
-	return v, nil
+	m.m[k] = e
+	m.evict()
+	m.mu.Unlock()
+
+	e.v, e.err = fn(k)
+	close(e.done)
+
+	if e.err != nil {
+		// a transient failure (a cancelled request, git quota) would otherwise
+		// be the answer forever
+		m.mu.Lock()
+		if m.m[k] == e {
+			delete(m.m, k)
+		}
+		m.mu.Unlock()
+	}
+	return e.v, e.err
+}
+
+// evict drops the least recently used entries until the memo is within its
+// limit. It runs with the lock held.
+func (m *memo[K, V]) evict() {
+	for m.max > 0 && len(m.m) > m.max {
+		var (
+			old   K
+			used  int64
+			found bool
+		)
+		for k, e := range m.m {
+			if !found || e.used < used {
+				old, used, found = k, e.used, true
+			}
+		}
+		delete(m.m, old)
+	}
 }
