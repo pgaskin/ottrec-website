@@ -2158,6 +2158,9 @@ const overlayJS = `
   // a version switch; a different page re-centers on the version being viewed
   const same=page(loc(url))===page(here)
   const at=same&&wrap?wrap.scrollLeft:null, top=side?side.scrollTop:0
+  // kept across every load which swaps the body, not just a version switch.
+  // the injected bar is at the top of the body, so the first match is ours
+  const heads=document.querySelector('#__cpz')?.checked
   const keep=same&&!pop?anchor():null
   document.documentElement.dataset.cpBusy='1'
   try{
@@ -2182,6 +2185,9 @@ const overlayJS = `
    }catch(err){
     console.error('ottrec-webarchive: bind:',err) // the page is still usable unbound
    }
+   // before the scroll position is worked out: opening it moves the page down
+   const hd=heads&&document.querySelector('#__cpz')
+   if(hd)hd.checked=true
    const sb=q('#__cpsb')
    if(sb)sb.scrollTop=top
    const el=keep&&document.getElementById(keep.id)
