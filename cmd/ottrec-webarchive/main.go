@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,7 @@ var (
 	GitBurst     = pflag.Int("git-burst", 128, "burst of git processes for serving requests")
 	GitWait      = pflag.Duration("git-wait", time.Second*10, "how long a request waits for git quota before giving up")
 	NoPrecache   = pflag.Bool("no-precache", false, "don't precompute each page's history in the background while nothing else is being served")
+	CacheDir     = pflag.StringP("cache-dir", "c", "", "directory to keep what was precomputed in, so a restart doesn't work it out again (empty to keep it in memory only)")
 	LogLevel     = pflagx.LevelP("log-level", "L", slog.LevelInfo, "log level")
 	LogJSON      = pflag.Bool("log-json", false, "use json logs")
 	Help         = pflag.BoolP("help", "h", false, "show this help text")
@@ -132,6 +134,9 @@ func run() error {
 	srv, err := newServer(ctx, *Repo, cmp.Or(*RepoRev, *RepoBranch))
 	if err != nil {
 		return err
+	}
+	if *CacheDir != "" {
+		srv.useCache(ctx, *CacheDir)
 	}
 	srv.log()
 	srv.precacheStart()
@@ -277,7 +282,12 @@ type server struct {
 	trees   memo[string, map[string]string] // rev -> sha1(url) -> filename
 	entries memo[string, []entry]           // rev -> cache entries, sorted by url
 	urls    memo[string, map[string]string] // rev -> url -> filename
-	hist    memo[string, []change]          // pathspec -> versions at which an entry changed
+	hist    memo[string, []change]          // page -> versions at which it changed
+	scans   memo[string, struct{}]          // tip -> the changelog covers it
+
+	changes changelog   // what changed in each commit, by entry
+	digests digestCache // blob -> what it says, for classifying changes
+	cache   *cacheFile  // where both are kept between runs, nil if nowhere
 }
 
 // view is one request's read of the history. The scanned history is immutable
@@ -314,6 +324,22 @@ type change struct {
 	Tier    int `json:"t"`
 
 	name string // the entry filename at that version
+	oid  string // the blob it became, empty if it was removed
+}
+
+// pageRef identifies a cache entry across the whole history. Entries are
+// matched by the sha1 of their url, since the category prefix in the filename
+// has changed over time; the filename is only used for old entries cached
+// under a url which differs from the one in their stored request.
+type pageRef struct {
+	Name string // the entry's filename at the version being viewed, if known
+	Key  string // sha1(url)
+}
+
+// named reports whether the entry has to be followed by filename rather than
+// by url.
+func (r pageRef) named() bool {
+	return r.Name != "" && !strings.HasSuffix(r.Name, "-"+r.Key)
 }
 
 // Change tiers, in increasing prominence. Only the text is compared, so markup,
@@ -342,6 +368,7 @@ func newServer(ctx context.Context, repo, rev string) (*server, error) {
 		static: static.Handler(static.Webarchive),
 	}
 	s.trees.max, s.entries.max, s.urls.max = memoCommits, memoCommits, memoCommits
+	s.scans.max = 4
 	if _, err := s.reload(ctx); err != nil {
 		return nil, err
 	}
@@ -443,8 +470,12 @@ func (s *server) precache(ctx context.Context) {
 	v := s.snapshot()
 	hash := v.versions[len(v.versions)-1].Hash
 
-	// the entry list comes first: every page's sidebar needs it
+	// the whole-history scan comes first: every page's seekbar is read out of it
 	if err := s.precacheIdle(ctx, idle); err != nil {
+		return
+	}
+	if err := v.scanned(ctx); err != nil {
+		slog.Debug("precache: scan history", "error", err)
 		return
 	}
 	es, err := s.list(ctx, hash)
@@ -463,7 +494,7 @@ func (s *server) precache(ctx context.Context) {
 		}
 		sum := sha1.Sum([]byte(e.URL))
 
-		_, err := v.history(ctx, histSpec(e.Name, hex.EncodeToString(sum[:])))
+		_, err := v.history(ctx, pageRef{Name: e.Name, Key: hex.EncodeToString(sum[:])})
 		if err != nil {
 			slog.Debug("precache: read history", "entry", e.Name, "error", err)
 			continue
@@ -669,7 +700,7 @@ func (s *view) serveCached(w http.ResponseWriter, r *http.Request, cur int, date
 
 	name, err := s.resolve(ctx, cur, key, u)
 	if err != nil {
-		s.serveError(w, r, cur, dated, u, histSpec("", key), status(err), err.Error())
+		s.serveError(w, r, cur, dated, u, pageRef{Key: key}, status(err), err.Error())
 		return
 	}
 	if name == "" {
@@ -688,21 +719,21 @@ func (s *view) serveCached(w http.ResponseWriter, r *http.Request, cur int, date
 		// still show the seekbar: the page may be cached at another version, so
 		// resolve its name there to get the tick marks
 		latest, _ := s.resolve(ctx, len(s.versions)-1, key, u)
-		s.serveError(w, r, cur, dated, u, histSpec(latest, key), http.StatusNotFound,
+		s.serveError(w, r, cur, dated, u, pageRef{Name: latest, Key: key}, http.StatusNotFound,
 			"not cached at this version: "+u.String(), s.variantList(cur, dated, vs))
 		return
 	}
-	spec := histSpec(name, key)
+	ref := pageRef{Name: name, Key: key}
 
 	buf, err := s.cat(ctx, s.versions[cur].Hash, name)
 	if err != nil {
-		s.serveError(w, r, cur, dated, u, spec, status(err), err.Error())
+		s.serveError(w, r, cur, dated, u, ref, status(err), err.Error())
 		return
 	}
 
 	_, resp, body, err := parseEntry(buf)
 	if err != nil {
-		s.serveError(w, r, cur, dated, u, spec, status(err), err.Error())
+		s.serveError(w, r, cur, dated, u, ref, status(err), err.Error())
 		return
 	}
 
@@ -739,7 +770,7 @@ func (s *view) serveCached(w http.ResponseWriter, r *http.Request, cur int, date
 		} else {
 			body = clean
 		}
-		body = s.inject(ctx, h, body, r, cur, dated, u, spec, entryHead(buf))
+		body = s.inject(ctx, h, body, r, cur, dated, u, ref, entryHead(buf))
 	} else {
 		// nothing to enhance, so lock it down entirely
 		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
@@ -872,7 +903,7 @@ func rawName(u *url.URL, stamp string, resp *http.Response) string {
 	return base + "-" + stamp + ext
 }
 
-func (s *view) serveError(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL, spec string, status int, msg string, extra ...string) {
+func (s *view) serveError(w http.ResponseWriter, r *http.Request, cur int, dated bool, u *url.URL, ref pageRef, status int, msg string, extra ...string) {
 	if status == http.StatusServiceUnavailable {
 		// rendering the full page needs git too, which is the thing we're out of
 		httpError(w, msg, status)
@@ -886,7 +917,7 @@ func (s *view) serveError(w http.ResponseWriter, r *http.Request, cur int, dated
 		`<p style="font:14px/1.5 Roboto,system-ui,sans-serif;margin:2rem"><a href="/__cache" rel="nofollow">cache index</a></p>` +
 		`</body></html>`)
 	h := w.Header()
-	body = s.inject(r.Context(), h, body, r, cur, dated, u, spec, "")
+	body = s.inject(r.Context(), h, body, r, cur, dated, u, ref, "")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(status)
@@ -904,7 +935,7 @@ func (s *view) serveIndex(w http.ResponseWriter, r *http.Request, cur int, dated
 
 	entries, err := s.list(ctx, s.versions[cur].Hash)
 	if err != nil {
-		s.serveError(w, r, cur, dated, nil, "", status(err), err.Error())
+		s.serveError(w, r, cur, dated, nil, pageRef{}, status(err), err.Error())
 		return
 	}
 
@@ -920,7 +951,7 @@ func (s *view) serveIndex(w http.ResponseWriter, r *http.Request, cur int, dated
 	b.WriteString(`</ul></body></html>`)
 
 	h := w.Header()
-	body := s.inject(ctx, h, []byte(b.String()), r, cur, dated, nil, "", "")
+	body := s.inject(ctx, h, []byte(b.String()), r, cur, dated, nil, pageRef{}, "")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
@@ -1282,12 +1313,12 @@ func rewriteURL(v, host, prefix string) (string, bool) {
 
 // inject adds the version selector overlay and the CSP which keeps the page
 // from reaching anything real, and sets the response headers it needs.
-func (s *view) inject(ctx context.Context, h http.Header, body []byte, r *http.Request, cur int, dated bool, u *url.URL, spec, head string) []byte {
+func (s *view) inject(ctx context.Context, h http.Header, body []byte, r *http.Request, cur int, dated bool, u *url.URL, ref pageRef, head string) []byte {
 	var changes []change
-	if spec != "" {
+	if ref.Key != "" {
 		var err error
-		if changes, err = s.history(ctx, spec); err != nil {
-			slog.Warn("read history", "spec", spec, "error", err)
+		if changes, err = s.history(ctx, ref); err != nil {
+			slog.Warn("read history", "entry", ref.Name, "url", u, "error", err)
 		}
 	}
 
@@ -2171,12 +2202,9 @@ func (s *server) tree(ctx context.Context, hash string) (map[string]string, erro
 		}
 		m := map[string]string{}
 		for line := range strings.Lines(string(buf)) {
-			// `<category>-<sha1(url)>`, and the category has had a hyphen in it
 			name := strings.TrimSpace(line)
-			if i := strings.LastIndexByte(name, '-'); i >= 0 {
-				if key := name[i+1:]; len(key) == hex.EncodedLen(sha1.Size) {
-					m[key] = name
-				}
+			if key, ok := entryKey(name); ok {
+				m[key] = name
 			}
 		}
 		return m, nil
@@ -2217,65 +2245,250 @@ func (s *server) list(ctx context.Context, hash string) ([]entry, error) {
 	})
 }
 
-// histSpec is the pathspec matching an entry across the whole history. Entries
-// are matched by url hash, since the category prefix has changed over time. The
-// filename is only used for old entries cached under a url which differs from
-// the one in their stored request.
-func histSpec(name, key string) string {
-	if name == "" || strings.HasSuffix(name, "-"+key) {
-		return ":(glob)*-" + key
+// entryKey is the sha1(url) a cache entry's filename ends with. The category
+// prefix has changed over time, and has had a hyphen in it, so only the last
+// one separates it.
+func entryKey(name string) (string, bool) {
+	if i := strings.LastIndexByte(name, '-'); i >= 0 {
+		if key := name[i+1:]; len(key) == hex.EncodedLen(sha1.Size) {
+			return key, true
+		}
 	}
-	return name
+	return "", false
 }
 
-// history gets the versions at which a cache entry changed, ascending, with the
-// size of each change (used for the seekbar bar heights).
-func (s *view) history(ctx context.Context, spec string) ([]change, error) {
-	// version indexes are baked into the result, so the tip is part of the key:
-	// a request still rendering against an older history can't poison it
-	return s.hist.get(ctx, s.tip+" "+spec, func(string) ([]change, error) {
-		// walked from the branch tip, not the newest version: the display order
-		// is by commit date, and log can only walk back from where it starts
-		buf, err := s.git(ctx, "log", "--first-parent", "--no-renames", "--format=%x00%H", "--numstat",
-			"--end-of-options", s.tip, "--", spec)
-		if err != nil {
-			return nil, err
+// rec is one cache entry's change in one commit.
+type rec struct {
+	commit  string
+	name    string // the entry's filename in it
+	oid     string // the blob it became, empty if it was removed
+	added   int32
+	deleted int32
+}
+
+// changelog is what changed in every commit, indexed by entry. It is keyed by
+// commit rather than by version, so a reload doesn't invalidate it, and it is
+// scanned in one pass: walking the whole history costs about what a dozen
+// per-page walks do, and it covers every page.
+type changelog struct {
+	mu     sync.RWMutex
+	tip    string              // what the last scan ended at, to extend from
+	seen   map[string]struct{} // the commits it covers
+	recs   []rec
+	byKey  map[string][]int32 // sha1(url) -> indexes into recs
+	byName map[string][]int32 // filename -> indexes into recs
+}
+
+// from is the commit the next scan can pick up at.
+func (cl *changelog) from() string {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
+	return cl.tip
+}
+
+// merge records a scan, skipping the commits already in it (two scans can
+// overlap when the history moves under one of them), and reports the commits it
+// added.
+func (cl *changelog) merge(tip string, hashes []string, batch []rec) []string {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	if cl.seen == nil {
+		cl.seen = map[string]struct{}{}
+		cl.byKey, cl.byName = map[string][]int32{}, map[string][]int32{}
+	}
+	var added []string
+	fresh := make(map[string]bool, len(hashes))
+	for _, h := range hashes {
+		if _, ok := cl.seen[h]; !ok {
+			cl.seen[h], fresh[h] = struct{}{}, true
+			added = append(added, h)
 		}
-		var (
-			cs   []change
-			skip bool // a commit which isn't part of the history being served
-		)
-		for line := range strings.Lines(string(buf)) {
-			line = strings.TrimRight(line, "\n")
-			if hash, ok := strings.CutPrefix(line, "\x00"); ok {
-				i, known := s.index[hash]
-				skip = !known // and so are the numstat lines which follow it
-				if known {
-					cs = append(cs, change{Version: i})
-				}
+	}
+	for _, r := range batch {
+		if !fresh[r.commit] {
+			continue
+		}
+		i := int32(len(cl.recs))
+		cl.recs = append(cl.recs, r)
+		if key, ok := entryKey(r.name); ok {
+			cl.byKey[key] = append(cl.byKey[key], i)
+		}
+		cl.byName[r.name] = append(cl.byName[r.name], i)
+	}
+	cl.tip = tip
+	return added
+}
+
+// get returns the recorded changes for one page, in scan order.
+func (cl *changelog) get(ref pageRef) []rec {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
+
+	idx := cl.byKey[ref.Key]
+	if ref.named() {
+		idx = cl.byName[ref.Name]
+	}
+	out := make([]rec, len(idx))
+	for i, j := range idx {
+		out[i] = cl.recs[j]
+	}
+	return out
+}
+
+// scanned makes sure the changelog covers the history being served. The scan is
+// shared: the first caller runs it and the rest wait for it.
+func (s *view) scanned(ctx context.Context) error {
+	_, err := s.scans.get(ctx, s.tip, func(tip string) (struct{}, error) {
+		return struct{}{}, s.rescan(ctx, tip)
+	})
+	return err
+}
+
+// rescan records what changed in each commit which hasn't been scanned yet.
+func (s *server) rescan(ctx context.Context, tip string) error {
+	if err := s.wait(ctx); err != nil {
+		return err
+	}
+	start := time.Now()
+
+	// the scan covers a first-parent prefix of the history, so it only has to
+	// be extended, as long as what it ended at is still part of it
+	rev := tip
+	if from := s.changes.from(); from != "" {
+		if _, err := gitExec(ctx, s.repo, "merge-base", "--is-ancestor", "--end-of-options", from, tip); err == nil {
+			rev = from + ".." + tip
+		} else {
+			slog.Warn("scan: the history no longer contains the last scan, reading all of it", "from", from)
+		}
+	}
+
+	// `--raw` names the blob each entry became, so a change can be classified
+	// without reading anything which has been read before
+	cmd := exec.CommandContext(ctx, "git", "log", "--first-parent", "--no-renames",
+		"--raw", "--numstat", "--no-abbrev", "--format=%x00%H", "--end-of-options", rev)
+	cmd.Dir = s.repo
+	cmd.Stdin = nil
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	var (
+		commit string
+		hashes []string
+		batch  []rec
+		names  = map[string]string{} // a few hundred filenames over ~80k records
+		at     = map[string]int{}    // filename -> index into batch, per commit
+	)
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "":
+		case strings.HasPrefix(line, "\x00"):
+			commit = line[1:]
+			hashes = append(hashes, commit)
+			clear(at)
+		case strings.HasPrefix(line, ":"):
+			// `:<mode> <mode> <src> <dst> <status>\t<path>`
+			meta, path, ok := strings.Cut(line, "\t")
+			if !ok || commit == "" {
 				continue
 			}
+			f := strings.Fields(meta)
+			if len(f) < 5 {
+				continue
+			}
+			oid := f[3]
+			if strings.Trim(oid, "0") == "" {
+				oid = "" // the entry was removed
+			}
+			name, ok := names[path]
+			if !ok {
+				name, names[path] = path, path
+			}
+			at[name] = len(batch)
+			batch = append(batch, rec{commit: commit, name: name, oid: oid})
+		default:
 			// `<added>\t<deleted>\t<path>`, or `-` for binary files
-			if skip || len(cs) == 0 || line == "" {
-				continue
-			}
 			add, rest, ok := strings.Cut(line, "\t")
 			if !ok {
 				continue
 			}
-			del, name, _ := strings.Cut(rest, "\t")
-			c := &cs[len(cs)-1]
+			del, path, ok := strings.Cut(rest, "\t")
+			if !ok {
+				continue
+			}
+			i, ok := at[path]
+			if !ok {
+				continue // no raw line for it, so there is nothing to count
+			}
 			if n, err := strconv.Atoi(add); err == nil {
-				c.Added += n
+				batch[i].added = int32(n)
 			}
 			if n, err := strconv.Atoi(del); err == nil {
-				c.Deleted += n
+				batch[i].deleted = int32(n)
 			}
-			c.name = strings.TrimSpace(name)
 		}
-		// a commit with no numstat line for the entry (a merge) says nothing
-		// about it, and has no blob for classify to read
-		cs = slices.DeleteFunc(cs, func(c change) bool { return c.name == "" })
+	}
+	if err := sc.Err(); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return fmt.Errorf("read git log: %w", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		return transformError(err, stderr.Bytes())
+	}
+
+	fresh := s.changes.merge(tip, hashes, batch)
+	if s.cache != nil {
+		s.cache.putScan(fresh, batch, tip)
+	}
+	slog.Info("scan: read what changed in each commit", "commits", len(fresh), "changes", len(batch), "took", time.Since(start))
+	return nil
+}
+
+// history gets the versions at which a cache entry changed, ascending, with the
+// size of each change (used for the seekbar bar heights).
+func (s *view) history(ctx context.Context, ref pageRef) ([]change, error) {
+	if ref.Key == "" {
+		return nil, nil
+	}
+	if err := s.scanned(ctx); err != nil {
+		return nil, err
+	}
+	// version indexes are baked into the result, so the tip is part of the key:
+	// a request still rendering against an older history can't poison it
+	return s.hist.get(ctx, s.tip+" "+ref.Name+" "+ref.Key, func(string) ([]change, error) {
+		var (
+			cs []change
+			at = map[int]int{} // version -> index into cs
+		)
+		for _, r := range s.changes.get(ref) {
+			i, ok := s.index[r.commit]
+			if !ok {
+				continue // not part of the history being served
+			}
+			j, ok := at[i]
+			if !ok {
+				j, at[i] = len(cs), len(cs)
+				cs = append(cs, change{Version: i})
+			}
+			// a commit can touch the entry under more than one name while the
+			// category prefix is changing; what it ended up as is the last one
+			cs[j].Added += int(r.added)
+			cs[j].Deleted += int(r.deleted)
+			cs[j].name, cs[j].oid = r.name, r.oid
+		}
 		slices.SortFunc(cs, func(a, b change) int { return cmp.Compare(a.Version, b.Version) })
 
 		// an unclassified history isn't worth keeping: every change would read
@@ -2289,34 +2502,53 @@ func (s *view) history(ctx context.Context, spec string) ([]change, error) {
 
 // classify fills in the tier of each change by comparing the text of the
 // response with the previous one.
-func (s *view) classify(ctx context.Context, cs []change) error {
+func (s *server) classify(ctx context.Context, cs []change) error {
 	if len(cs) == 0 {
 		return nil
 	}
 
-	specs := make([]string, len(cs))
-	for i, c := range cs {
-		specs[i] = s.versions[c.Version].Hash + ":" + c.name
+	// a blob says the same thing wherever it turns up, so only the ones which
+	// haven't been read before are read at all
+	ds := make([]digest, len(cs))
+	var (
+		need []string             // blobs still to read
+		at   = map[string][]int{} // blob -> the changes waiting on it
+	)
+	for i := range cs {
+		switch d, ok := s.digests.get(cs[i].oid); {
+		case cs[i].oid == "":
+			cs[i].Tier = tierGone // the cache was cleared at this version
+		case ok:
+			ds[i] = d
+		default:
+			if _, waiting := at[cs[i].oid]; !waiting {
+				need = append(need, cs[i].oid)
+			}
+			at[cs[i].oid] = append(at[cs[i].oid], i)
+		}
 	}
 
 	// parsing a few hundred pages, so spread it over the cpus; each one is
 	// digested as it is read, so they aren't all in memory at once
-	ds := make([]digest, len(cs))
 	var (
 		wg  sync.WaitGroup
 		sem = make(chan struct{}, runtime.GOMAXPROCS(0))
 	)
-	err := s.catEach(ctx, specs, func(i int, buf []byte) error {
+	err := s.catEach(ctx, need, func(i int, buf []byte) error {
+		oid := need[i]
 		if buf == nil {
-			cs[i].Tier = tierGone // the cache was cleared at this version
-			return nil
+			return fmt.Errorf("blob %s is missing", oid) // it was named by the scan
 		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			ds[i] = digestEntry(buf)
+			d := digestEntry(buf)
+			s.digests.put(oid, d)
+			for _, j := range at[oid] {
+				ds[j] = d
+			}
 		}()
 		return nil
 	})
@@ -2340,6 +2572,47 @@ func (s *view) classify(ctx context.Context, cs []change) error {
 		prev = &ds[i]
 	}
 	return nil
+}
+
+// digestCache holds the fingerprint of a blob, which is what classifying a
+// change costs. Keyed by the blob, so it is shared by every page and every
+// version with the same content, and outlives a reload: the day's new commit
+// only adds what it actually changed.
+type digestCache struct {
+	mu   sync.Mutex
+	m    map[string]digest
+	file *cacheFile // where they're kept between runs, nil if nowhere
+}
+
+func (dc *digestCache) get(oid string) (digest, bool) {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	d, ok := dc.m[oid]
+	return d, ok
+}
+
+// add remembers a digest for as long as the process lives.
+func (dc *digestCache) add(oid string, d digest) {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	if dc.m == nil {
+		dc.m = map[string]digest{}
+	}
+	dc.m[oid] = d
+}
+
+// put remembers a digest, and writes it out so the next run doesn't have to
+// work it out again.
+func (dc *digestCache) put(oid string, d digest) {
+	dc.add(oid, d)
+
+	dc.mu.Lock()
+	file := dc.file
+	dc.mu.Unlock()
+
+	if file != nil {
+		file.putDigest(oid, d)
+	}
 }
 
 // digest fingerprints the parts of a cached response which changes are
@@ -2611,6 +2884,406 @@ func transformError(err error, stderr []byte) error {
 
 func isLikelyGitHash(hash string) bool {
 	return len(hash) >= 40 && strings.Trim(hash, "0123456789abcdef") == ""
+}
+
+// The disk cache.
+//
+// What the server works out about the repo - every blob's digest, and what
+// changed in each commit - takes minutes to derive and is what a restart would
+// otherwise pay for again. All of it is keyed by content, so it stays valid
+// across reloads, rebuilds of this program and re-clones of the repo: only a
+// change to how something is derived invalidates it, which is what the format
+// line covers. Nothing which is keyed by version index goes in it, since those
+// move when the history does.
+//
+// The file is a format line followed by `<kind><length><payload>` records,
+// appended as things are worked out. A torn tail from a crash is truncated when
+// it's read back, and a commit is a single record, so half a scan can't be
+// mistaken for a whole one. One writer is expected: a second one risks losing
+// records, never mixing them up.
+const (
+	// cacheFormat is the file's layout, and the version of each thing in it. A
+	// version is bumped when what it holds is derived differently:
+	//   digests - digestEntry, hashText, texts, noText, mainID
+	//   commits - what rescan reads out of git log
+	// A file which doesn't match is written again from scratch.
+	cacheFormat = "ottrec-webarchive cache: format 1, digests 1, commits 1\n"
+
+	kindDigest = 1 // one blob's digest
+	kindCommit = 2 // what one commit changed
+	kindScan   = 3 // the commit the scan had reached, after the commits it covers
+
+	cacheFlushEvery = time.Second * 5
+	cacheFlushSize  = 1 << 20
+	cacheMaxRecord  = 1 << 24 // an impossible length is a corrupt file, not an allocation
+)
+
+// zeroOID is the null blob: an entry which was removed.
+var zeroOID [sha1.Size]byte
+
+type cacheFile struct {
+	path string
+
+	mu      sync.Mutex
+	f       *os.File
+	pending []byte // records waiting to be written
+	scratch []byte // reused while encoding one
+	broken  bool   // writing failed, so nothing more is kept
+}
+
+// openCache opens the cache file in dir, creating it if it isn't there.
+func openCache(dir string) (*cacheFile, error) {
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "webarchive.cache")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
+	if err != nil {
+		return nil, err
+	}
+	return &cacheFile{path: path, f: f}, nil
+}
+
+// useCache reads back what earlier runs worked out, and starts keeping what
+// this one does. It runs before anything is served, so nothing else is looking
+// at what it fills in.
+func (s *server) useCache(ctx context.Context, dir string) {
+	start := time.Now()
+
+	c, err := openCache(dir)
+	if err != nil {
+		slog.Error("cache: carrying on without one", "dir", dir, "error", err)
+		return
+	}
+	digests, commits, err := c.load(&s.digests, &s.changes)
+	if err != nil {
+		slog.Error("cache: carrying on without one", "path", c.path, "error", err)
+		return
+	}
+	s.digests.file, s.cache = c, c
+	go c.run(ctx)
+
+	slog.Info("cache: read", "path", c.path, "digests", digests, "commits", commits, "took", time.Since(start))
+}
+
+// run writes out what has been recorded, until ctx is done.
+func (c *cacheFile) run(ctx context.Context) {
+	t := time.NewTicker(cacheFlushEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			c.flush()
+			return
+		case <-t.C:
+			c.flush()
+		}
+	}
+}
+
+// load reads the file, reporting how much was in it. Anything it can't read is
+// dropped: this is a cache, so it is simply worked out again.
+func (c *cacheFile) load(dc *digestCache, cl *changelog) (digests, commits int, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, err := c.f.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, err
+	}
+	r := bufio.NewReader(c.f)
+
+	line, err := r.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, 0, err
+	}
+	if line != cacheFormat {
+		if line != "" {
+			slog.Info("cache: written by a different version, starting it again", "path", c.path)
+		}
+		return 0, 0, c.resetLocked()
+	}
+
+	var (
+		off    = int64(len(line)) // the end of the last whole record
+		hashes []string
+		batch  []rec
+		names  = map[string]string{} // a few hundred filenames over ~80k records
+		tip    string
+		bad    bool
+	)
+	for !bad {
+		kind, err := r.ReadByte()
+		if err != nil {
+			break
+		}
+		size, err := binary.ReadUvarint(r)
+		if err != nil || size > cacheMaxRecord {
+			break
+		}
+		p := make([]byte, size)
+		if _, err := io.ReadFull(r, p); err != nil {
+			break
+		}
+		switch kind {
+		case kindDigest:
+			oid, d, ok := parseDigest(p)
+			if !ok {
+				bad = true
+				continue
+			}
+			dc.add(oid, d)
+			digests++
+		case kindCommit:
+			hash, rs, ok := parseCommit(p, names)
+			if !ok {
+				bad = true
+				continue
+			}
+			hashes = append(hashes, hash)
+			batch = append(batch, rs...)
+			commits++
+		case kindScan:
+			if len(p) == sha1.Size {
+				tip = hex.EncodeToString(p)
+			}
+		}
+		off += 1 + uvarintLen(size) + int64(size)
+	}
+	if len(hashes) > 0 {
+		cl.merge(tip, hashes, batch)
+	}
+
+	// whatever is past the last whole record is a write which didn't finish
+	if st, err := c.f.Stat(); err == nil && st.Size() > off {
+		slog.Warn("cache: dropping an unfinished write at the end", "path", c.path, "bytes", st.Size()-off)
+		if err := c.f.Truncate(off); err != nil {
+			return digests, commits, err
+		}
+	}
+	return digests, commits, nil
+}
+
+// resetLocked empties the file and writes the format line. The lock is held.
+func (c *cacheFile) resetLocked() error {
+	if err := c.f.Truncate(0); err != nil {
+		return err
+	}
+	c.pending = append(c.pending[:0], cacheFormat...)
+	return c.flushLocked()
+}
+
+// putDigest records what a blob says.
+func (c *cacheFile) putDigest(oid string, d digest) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var ok bool
+	if c.scratch, ok = appendDigest(c.scratch[:0], oid, d); ok {
+		c.record(kindDigest, c.scratch)
+	}
+	if len(c.pending) >= cacheFlushSize {
+		c.flushLocked()
+	}
+}
+
+// putScan records what a scan found in the commits it added, and where it got
+// to. The mark goes last, so a write which didn't finish leaves the next run
+// scanning again from further back rather than trusting half a scan.
+func (c *cacheFile) putScan(fresh []string, batch []rec, tip string) {
+	if len(fresh) == 0 {
+		return
+	}
+	keep := make(map[string]bool, len(fresh))
+	for _, h := range fresh {
+		keep[h] = true
+	}
+	byCommit := make(map[string][]rec, len(fresh))
+	for _, r := range batch {
+		if keep[r.commit] {
+			byCommit[r.commit] = append(byCommit[r.commit], r)
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, h := range fresh {
+		var ok bool
+		if c.scratch, ok = appendCommit(c.scratch[:0], h, byCommit[h]); ok {
+			c.record(kindCommit, c.scratch)
+		}
+	}
+	if raw, err := hex.DecodeString(tip); err == nil && len(raw) == sha1.Size {
+		c.record(kindScan, raw)
+	}
+	c.flushLocked() // a scan is worth more than the rest, and is written rarely
+}
+
+// record adds a record to what is waiting to be written. The lock is held.
+func (c *cacheFile) record(kind byte, payload []byte) {
+	if c.broken {
+		return
+	}
+	c.pending = append(c.pending, kind)
+	c.pending = binary.AppendUvarint(c.pending, uint64(len(payload)))
+	c.pending = append(c.pending, payload...)
+}
+
+func (c *cacheFile) flush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushLocked()
+}
+
+// flushLocked writes what is waiting, in one go so a second writer can only
+// interleave whole records. The lock is held.
+func (c *cacheFile) flushLocked() error {
+	if c.broken || len(c.pending) == 0 {
+		return nil
+	}
+	if _, err := c.f.Write(c.pending); err != nil {
+		slog.Error("cache: write failed, keeping the rest in memory", "path", c.path, "error", err)
+		c.broken, c.pending = true, nil
+		return err
+	}
+	c.pending = c.pending[:0]
+	return nil
+}
+
+// appendDigest encodes a blob's digest: the blob, which of the three hashes are
+// there, and the hashes themselves.
+func appendDigest(buf []byte, oid string, d digest) ([]byte, bool) {
+	raw, err := hex.DecodeString(oid)
+	if err != nil || len(raw) != sha1.Size {
+		return buf, false
+	}
+	buf = append(buf, raw...)
+
+	hs := [3]string{d.full, d.main, d.sched}
+	var flags byte
+	for i, h := range hs {
+		if len(h) == sha1.Size {
+			flags |= 1 << i
+		}
+	}
+	buf = append(buf, flags)
+	for _, h := range hs {
+		if len(h) == sha1.Size {
+			buf = append(buf, h...)
+		} else {
+			buf = append(buf, zeroOID[:]...)
+		}
+	}
+	return buf, true
+}
+
+func parseDigest(p []byte) (string, digest, bool) {
+	if len(p) != sha1.Size*4+1 {
+		return "", digest{}, false
+	}
+	var (
+		d     digest
+		flags = p[sha1.Size]
+		hs    = [3]*string{&d.full, &d.main, &d.sched}
+	)
+	for i, h := range hs {
+		if flags&(1<<i) != 0 {
+			at := sha1.Size + 1 + i*sha1.Size
+			*h = string(p[at : at+sha1.Size])
+		}
+	}
+	return hex.EncodeToString(p[:sha1.Size]), d, true
+}
+
+// appendCommit encodes what one commit changed. It is one record, so it is
+// either all there or not there at all.
+func appendCommit(buf []byte, hash string, rs []rec) ([]byte, bool) {
+	raw, err := hex.DecodeString(hash)
+	if err != nil || len(raw) != sha1.Size {
+		return buf, false
+	}
+	buf = append(buf, raw...)
+	buf = binary.AppendUvarint(buf, uint64(len(rs)))
+	for _, r := range rs {
+		if oid, err := hex.DecodeString(r.oid); err == nil && len(oid) == sha1.Size {
+			buf = append(buf, oid...)
+		} else {
+			buf = append(buf, zeroOID[:]...) // the entry was removed
+		}
+		buf = binary.AppendUvarint(buf, uint64(max(r.added, 0)))
+		buf = binary.AppendUvarint(buf, uint64(max(r.deleted, 0)))
+		buf = binary.AppendUvarint(buf, uint64(len(r.name)))
+		buf = append(buf, r.name...)
+	}
+	return buf, true
+}
+
+func parseCommit(p []byte, names map[string]string) (string, []rec, bool) {
+	if len(p) < sha1.Size {
+		return "", nil, false
+	}
+	hash := hex.EncodeToString(p[:sha1.Size])
+	p = p[sha1.Size:]
+
+	n, w := binary.Uvarint(p)
+	if w <= 0 || n > uint64(len(p)) {
+		return "", nil, false
+	}
+	p = p[w:]
+
+	rs := make([]rec, 0, n)
+	for range n {
+		if len(p) < sha1.Size {
+			return "", nil, false
+		}
+		var oid string
+		if !isZero(p[:sha1.Size]) {
+			oid = hex.EncodeToString(p[:sha1.Size])
+		}
+		p = p[sha1.Size:]
+
+		var ns [3]uint64
+		for i := range ns {
+			v, w := binary.Uvarint(p)
+			if w <= 0 {
+				return "", nil, false
+			}
+			ns[i], p = v, p[w:]
+		}
+		if ns[2] > uint64(len(p)) {
+			return "", nil, false
+		}
+		name := string(p[:ns[2]])
+		p = p[ns[2]:]
+		if s, ok := names[name]; ok {
+			name = s
+		} else {
+			names[name] = name
+		}
+		rs = append(rs, rec{
+			commit:  hash,
+			name:    name,
+			oid:     oid,
+			added:   int32(ns[0]),
+			deleted: int32(ns[1]),
+		})
+	}
+	return hash, rs, true
+}
+
+func isZero(p []byte) bool {
+	for _, b := range p {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// uvarintLen is how many bytes [binary.AppendUvarint] writes for n.
+func uvarintLen(n uint64) int64 {
+	var b [binary.MaxVarintLen64]byte
+	return int64(binary.PutUvarint(b[:], n))
 }
 
 // memo caches expensive lookups (what they describe is immutable, so nothing
