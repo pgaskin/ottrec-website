@@ -483,6 +483,14 @@ var Website = assets.
 	Cache("public, max-age=86400").
 	Alias("/favicon.ico", FaviconICO)
 
+var Webarchive = assets.
+	NewGroup(Base,
+		RobotoWOFF2,
+		RobotoItalicWOFF2,
+		MaterialSymbolsOutlinedWOFF2,
+	).
+	Cache("public, max-age=86400")
+
 var Data = assets.
 	NewGroup(Base,
 		// the data site now shares the main site's chrome (flexoki theme,
