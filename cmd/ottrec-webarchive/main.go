@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	_ "time/tzdata"
 
@@ -56,6 +57,7 @@ var (
 	GitRate      = pflag.Float64("git-rate", 64, "sustained git processes per second for serving requests")
 	GitBurst     = pflag.Int("git-burst", 128, "burst of git processes for serving requests")
 	GitWait      = pflag.Duration("git-wait", time.Second*10, "how long a request waits for git quota before giving up")
+	NoPrecache   = pflag.Bool("no-precache", false, "don't precompute each page's history in the background while nothing else is being served")
 	LogLevel     = pflagx.LevelP("log-level", "L", slog.LevelInfo, "log level")
 	LogJSON      = pflag.Bool("log-json", false, "use json logs")
 	Help         = pflag.BoolP("help", "h", false, "show this help text")
@@ -129,6 +131,7 @@ func run() error {
 		return err
 	}
 	srv.log()
+	srv.precacheStart()
 
 	slog.Info("updater: starting repo fetcher", "interval", *RepoInterval)
 	go func() {
@@ -150,6 +153,7 @@ func run() error {
 				slog.Error("updater: reload failed", "error", err)
 			case changed:
 				srv.log()
+				srv.precacheStart()
 			}
 		}
 	}()
@@ -237,6 +241,10 @@ type server struct {
 	limit *rate.Limiter // git processes, for work done on behalf of requests
 
 	static http.Handler // the font, from the website's asset pipeline
+
+	seen    atomic.Int64 // when the last request was served, for the precache
+	preMu   sync.Mutex
+	preStop context.CancelFunc
 
 	mu       sync.RWMutex   // held for the duration of a request, so the
 	versions []version      // history a response is rendered from can't change
@@ -351,6 +359,82 @@ func (s *server) reload(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// precacheStart restarts the background precache, which is only worth anything
+// after the history it precomputed against has changed.
+func (s *server) precacheStart() {
+	if *NoPrecache {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	s.preMu.Lock()
+	if s.preStop != nil {
+		s.preStop()
+	}
+	s.preStop = cancel
+	s.preMu.Unlock()
+
+	go s.precache(ctx)
+}
+
+// precache computes what the first visit to each page would otherwise pay for,
+// one page at a time, and only while nothing else is being served.
+func (s *server) precache(ctx context.Context) {
+	const idle = time.Second * 2
+
+	start := time.Now()
+	s.mu.RLock()
+	hash := s.versions[len(s.versions)-1].Hash
+	s.mu.RUnlock()
+
+	// the entry list comes first: every page's sidebar needs it
+	if err := s.precacheIdle(ctx, idle); err != nil {
+		return
+	}
+	es, err := s.list(ctx, hash)
+	if err != nil {
+		slog.Debug("precache: list entries", "error", err)
+		return
+	}
+
+	var n int
+	for _, e := range es {
+		if !e.HTML {
+			continue
+		}
+		if err := s.precacheIdle(ctx, idle); err != nil {
+			return
+		}
+		sum := sha1.Sum([]byte(e.URL))
+
+		s.mu.RLock()
+		_, err := s.history(ctx, histSpec(e.Name, hex.EncodeToString(sum[:])))
+		s.mu.RUnlock()
+
+		if err != nil {
+			slog.Debug("precache: read history", "entry", e.Name, "error", err)
+			continue
+		}
+		n++
+	}
+	slog.Info("precache: precomputed page histories", "pages", n, "took", time.Since(start))
+}
+
+// precacheIdle waits until nothing has been served for d.
+func (s *server) precacheIdle(ctx context.Context, d time.Duration) error {
+	for {
+		if wait := d - time.Since(time.Unix(0, s.seen.Load())); wait > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+				continue
+			}
+		}
+		return ctx.Err()
+	}
+}
+
 // log reports what is being served.
 func (s *server) log() {
 	s.mu.RLock()
@@ -362,6 +446,8 @@ func (s *server) log() {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.seen.Store(time.Now().UnixNano())
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
